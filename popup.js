@@ -641,6 +641,10 @@ function countFiles(items) {
 
 // --- Rendering ---
 
+// --- State ---
+let doThisMode = 'all'; // 'nextclass', 'nextweek', 'all'
+let searchQuery = '';
+
 function renderDashboard() {
     const courseCount = Object.keys(courses).length;
     const totalDeadlines = Object.values(courses).reduce((s, c) => s + (c.deadlines?.length || 0), 0);
@@ -660,41 +664,106 @@ function renderDashboard() {
             if (ignoredDeadlines.has(dlKey)) continue;
             const isDone = d.status === 'GRADED' || d.status === 'SUBMITTED';
             const entry = { ...d, shortName: name, color, courseId: id, isDone, dlKey };
+            
+            // Search filter
+            if (searchQuery) {
+                const q = searchQuery.toLowerCase();
+                const matchTitle = (d.title || '').toLowerCase().includes(q);
+                const matchCourse = name.toLowerCase().includes(q);
+                if (!matchTitle && !matchCourse) continue;
+            }
+            
             if (d.type === 'exam') exams.push(entry);
             else assignments.push(entry);
         }
     }
     
-    const sortByDate = (a, b) => (a.dueDate || '').localeCompare(b.dueDate || '');
-    assignments.sort(sortByDate);
-    exams.sort(sortByDate);
+    // Sort by class, then by date
+    const sortByClassThenDate = (a, b) => {
+        const classCompare = a.shortName.localeCompare(b.shortName);
+        if (classCompare !== 0) return classCompare;
+        return (a.dueDate || '').localeCompare(b.dueDate || '');
+    };
+    assignments.sort(sortByClassThenDate);
+    exams.sort(sortByClassThenDate);
     
     // Render each section
     renderDoThis(assignments);
+    renderDueToday(assignments, exams);
     renderPrep(exams);
     renderNow(assignments, exams);
     renderStatus(assignments, exams);
+    
+    // Attach search listener (once)
+    const searchInput = document.getElementById('searchInput');
+    if (searchInput && !searchInput._bound) {
+        searchInput._bound = true;
+        searchInput.addEventListener('input', (e) => {
+            searchQuery = e.target.value.trim();
+            renderDashboard();
+        });
+    }
+    
+    // Attach mode toggle listeners (once)
+    const modeContainer = document.getElementById('doThisModes');
+    if (modeContainer && !modeContainer._bound) {
+        modeContainer._bound = true;
+        modeContainer.querySelectorAll('.mode-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                modeContainer.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                doThisMode = btn.dataset.mode;
+                renderDashboard();
+            });
+        });
+    }
     
     document.getElementById('loadingState').classList.add('hidden');
     document.getElementById('dashboard').classList.remove('hidden');
 }
 
-// --- DO THIS: active assignments ---
+// --- DO THIS: active assignments + overdue ---
 
 function renderDoThis(assignments) {
     const el = document.getElementById('doThis');
-    const active = assignments.filter(a => !a.isDone);
+    const active = assignments.filter(a => !a.isDone && daysUntil(a.dueDate) > 0);
     
-    if (!active.length) {
-        el.innerHTML = '<p class="empty-msg">No assignments due — enjoy 🎉</p>';
+    // Apply mode filter
+    let filtered = active;
+    if (doThisMode === 'nextclass') {
+        filtered = active.filter(a => {
+            const days = daysUntil(a.dueDate);
+            return days !== null && days <= 2;
+        });
+    } else if (doThisMode === 'nextweek') {
+        filtered = active.filter(a => {
+            const days = daysUntil(a.dueDate);
+            return days !== null && days <= 7;
+        });
+    }
+    
+    if (!filtered.length) {
+        el.innerHTML = '<p class="empty-msg">Nothing coming up</p>';
         return;
     }
     
-    let html = '';
-    for (const a of active) {
-        html += renderTaskCard(a, 'assignment');
+    el.innerHTML = filtered.map(a => renderTaskCard(a, 'assignment')).join('');
+    attachCardListeners(el);
+}
+
+// --- DUE TODAY: items due today ---
+
+function renderDueToday(assignments, exams) {
+    const el = document.getElementById('dueToday');
+    const all = [...assignments, ...exams];
+    const today = all.filter(d => !d.isDone && daysUntil(d.dueDate) === 0);
+    
+    if (!today.length) {
+        el.innerHTML = '<p class="empty-msg">Nothing due today</p>';
+        return;
     }
-    el.innerHTML = html;
+    
+    el.innerHTML = today.map(d => renderTaskCard(d, d.type || 'assignment')).join('');
     attachCardListeners(el);
 }
 
@@ -709,11 +778,7 @@ function renderPrep(exams) {
         return;
     }
     
-    let html = '';
-    for (const e of upcoming) {
-        html += renderTaskCard(e, 'exam');
-    }
-    el.innerHTML = html;
+    el.innerHTML = upcoming.map(e => renderTaskCard(e, 'exam')).join('');
     attachCardListeners(el);
 }
 
@@ -776,27 +841,6 @@ function renderStatus(assignments, exams) {
         html += '</div>';
     }
     el.innerHTML = html;
-    
-    // Attach ignore listeners
-    el.querySelectorAll('.ignore-btn').forEach(btn => {
-        btn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            const key = btn.dataset.key;
-            ignoredDeadlines.add(key);
-            chrome.storage.local.get('scout_data').then(stored => {
-                const data = stored?.scout_data || {};
-                data.ignoredDeadlines = [...ignoredDeadlines];
-                chrome.storage.local.set({ scout_data: data });
-            });
-            const item = btn.closest('.status-item');
-            if (item) {
-                item.style.opacity = '0';
-                item.style.transform = 'translateX(20px)';
-                item.style.transition = 'all 0.3s';
-                setTimeout(() => renderDashboard(), 300);
-            }
-        });
-    });
 }
 
 // --- File bundling logic ---

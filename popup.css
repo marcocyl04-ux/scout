@@ -98,9 +98,19 @@ header { display: flex; justify-content: space-between; align-items: center; pad
 .hidden { display: none !important; }
 
 /* Task Engine Sections */
+.search-bar { margin-bottom: 12px; }
+.search-bar input { width: 100%; padding: 8px 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 12px; outline: none; }
+.search-bar input:focus { border-color: var(--accent); }
+.search-bar input::placeholder { color: var(--text-dim); }
+.section-header-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+.mode-toggles { display: flex; gap: 4px; }
+.mode-btn { background: var(--surface); border: 1px solid var(--border); color: var(--text-dim); font-size: 10px; padding: 3px 8px; border-radius: 4px; cursor: pointer; font-weight: 500; }
+.mode-btn:hover { border-color: var(--accent); color: var(--text); }
+.mode-btn.active { background: var(--accent); color: white; border-color: var(--accent); }
 .task-section { margin-bottom: 16px; }
 .section-title { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
 .section-title.do-this { color: var(--red); }
+.section-title.due-today { color: var(--yellow); }
 .section-title.prep { color: var(--orange); }
 .section-title.now { color: var(--accent); }
 .section-title.status { color: var(--text-dim); }

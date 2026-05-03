@@ -45,9 +45,23 @@
         
         <!-- Dashboard -->
         <div class="dashboard hidden" id="dashboard">
+            <div class="search-bar">
+                <input type="text" id="searchInput" placeholder="Search assignments, exams..." />
+            </div>
             <section class="task-section">
-                <h3 class="section-title do-this">⚡ DO THIS</h3>
+                <div class="section-header-row">
+                    <h3 class="section-title do-this">⚡ DO THIS</h3>
+                    <div class="mode-toggles" id="doThisModes">
+                        <button class="mode-btn" data-mode="nextclass">Next Class</button>
+                        <button class="mode-btn" data-mode="nextweek">Next Week</button>
+                        <button class="mode-btn active" data-mode="all">All</button>
+                    </div>
+                </div>
                 <div id="doThis"></div>
+            </section>
+            <section class="task-section">
+                <h3 class="section-title due-today">📌 DUE TODAY</h3>
+                <div id="dueToday"></div>
             </section>
             <section class="task-section">
                 <h3 class="section-title prep">📚 PREP FOR THIS</h3>
