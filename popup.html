@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scout</title>
+    <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+    <div class="app">
+        <header>
+            <div class="logo">
+                <span class="logo-icon">◉</span>
+                <span class="logo-text">Scout</span>
+            </div>
+            <div class="header-right">
+                <span class="meta" id="meta"></span>
+                <button class="refresh-btn" id="refreshBtn" title="Refresh">↻</button>
+            </div>
+        </header>
+        
+        <!-- Start screen -->
+        <div id="startScreen" class="empty-state">
+            <div class="empty-icon">◉</div>
+            <h2>Scout</h2>
+            <p>Click to extract your grades, deadlines, and announcements from Blackboard.</p>
+            <button class="btn" id="startBtn">Extract Data</button>
+        </div>
+        
+        <!-- Log -->
+        <div id="logContainer" style="margin-top:8px">
+            <div id="log" style="background:#0d0d1a;border:1px solid #333;border-radius:6px;padding:6px;max-height:150px;overflow-y:auto;font:10px monospace;color:#aaa;white-space:pre-wrap;word-break:break-all"></div>
+        </div>
+        
+        <!-- Status bar -->
+        <div class="status-bar hidden" id="statusBar">
+            <span class="status-text" id="statusText"></span>
+        </div>
+        
+        <!-- Loading -->
+        <div class="loading hidden" id="loadingState">
+            <div class="spinner"></div>
+            <p>Extracting data...</p>
+        </div>
+        
+        <!-- Dashboard -->
+        <div class="dashboard hidden" id="dashboard">
+            <section class="section">
+                <div id="actionCenter"></div>
+            </section>
+            <section class="section">
+                <h3>🆕 New This Week</h3>
+                <div id="newThisWeek"></div>
+            </section>
+            <section class="section">
+                <h3>📊 Grades</h3>
+                <div id="gradesList"></div>
+            </section>
+            <section class="section">
+                <h3>📢 Announcements</h3>
+                <div id="announcementsList"></div>
+            </section>
+            <div id="debugInfo"></div>
+        </div>
+    </div>
+    <script src="popup.js"></script>
+</body>
+</html>
