@@ -37,6 +37,11 @@ function scoreClass(s, max) {
     return (s/max) >= 0.8 ? 'high' : (s/max) >= 0.6 ? 'mid' : 'low';
 }
 function stripHtml(h) { const d = document.createElement('div'); d.innerHTML = h; return d.textContent || ''; }
+function classifyDeadline(title) {
+    const t = (title || '').toLowerCase();
+    if (/\b(exam|test|quiz|midterm|final)\b/.test(t)) return 'exam';
+    return 'assignment';
+}
 function setStatus(msg) { document.getElementById('statusText').textContent = msg; }
 function addLog(msg) {
     const el = document.getElementById('log');
@@ -430,7 +435,8 @@ async function runExtraction() {
                                 title: col.effectiveColumnName,
                                 dueDate: col.dueDate,
                                 source: 'gradebook',
-                                status: r.submissionStatus?.status
+                                status: r.submissionStatus?.status,
+                                type: classifyDeadline(col.effectiveColumnName)
                             });
                         }
                     }
@@ -461,7 +467,7 @@ async function runExtraction() {
                 for (const item of body.results) {
                     // Capture as deadline if it has an end date
                     if (item.title && item.endDate && !existingTitles.has(item.title)) {
-                        data.deadlines.push({ title: item.title, dueDate: item.endDate, source: 'calendar' });
+                        data.deadlines.push({ title: item.title, dueDate: item.endDate, source: 'calendar', type: classifyDeadline(item.title) });
                         existingTitles.add(item.title);
                     }
                     
@@ -637,35 +643,160 @@ function countFiles(items) {
 
 function renderDashboard() {
     const courseCount = Object.keys(courses).length;
-    const totalGrades = Object.values(courses).reduce((s, c) => s + (c.grades?.length || 0), 0);
     const totalDeadlines = Object.values(courses).reduce((s, c) => s + (c.deadlines?.length || 0), 0);
-    const totalFiles = Object.values(courses).reduce((s, c) => s + (c.files?.length || 0), 0);
     
-    document.getElementById('meta').textContent = `${courseCount} courses · ${totalGrades} grades · ${totalDeadlines} deadlines · ${totalFiles} files · stream: ${activityStream.length}`;
+    document.getElementById('meta').textContent = `${courseCount} courses · ${totalDeadlines} deadlines`;
     
-    renderActionCenter();
-    renderNewThisWeek();
-    renderGrades();
-    renderAnnouncements();
+    // Split deadlines by type
+    const assignments = [];
+    const exams = [];
     
-    // Debug: show deadline details
-    const debugEl = document.getElementById('debugInfo');
-    if (debugEl) {
-        let debugHtml = '<div style="font:10px monospace;color:#666;padding:8px;border-top:1px solid #222">';
-        debugHtml += `deadlines: ${totalDeadlines}, stream: ${activityStream.length}<br>`;
-        for (const [id, c] of Object.entries(courses)) {
-            const dl = c.deadlines || [];
-            debugHtml += `${shortName(c)}: ${dl.length} deadlines, files: ${c.files?.length || 0}, meets: ${c.meetingDaysNames?.join('/') || 'none'}<br>`;
-            for (const d of dl.slice(0, 3)) {
-                debugHtml += `&nbsp;&nbsp;${d.title} → ${d.dueDate || 'no date'} (${d.source})<br>`;
-            }
+    for (const [id, c] of Object.entries(courses)) {
+        const name = shortName(c), color = courseColor(id);
+        for (const d of (c.deadlines || [])) {
+            const days = daysUntil(d.dueDate);
+            if (days !== null && days < -14) continue;
+            const dlKey = `${id}-${d.title}-${d.dueDate}`;
+            if (ignoredDeadlines.has(dlKey)) continue;
+            const isDone = d.status === 'GRADED' || d.status === 'SUBMITTED';
+            const entry = { ...d, shortName: name, color, courseId: id, isDone, dlKey };
+            if (d.type === 'exam') exams.push(entry);
+            else assignments.push(entry);
         }
-        debugHtml += '</div>';
-        debugEl.innerHTML = debugHtml;
     }
+    
+    const sortByDate = (a, b) => (a.dueDate || '').localeCompare(b.dueDate || '');
+    assignments.sort(sortByDate);
+    exams.sort(sortByDate);
+    
+    // Render each section
+    renderDoThis(assignments);
+    renderPrep(exams);
+    renderNow(assignments, exams);
+    renderStatus(assignments, exams);
     
     document.getElementById('loadingState').classList.add('hidden');
     document.getElementById('dashboard').classList.remove('hidden');
+}
+
+// --- DO THIS: active assignments ---
+
+function renderDoThis(assignments) {
+    const el = document.getElementById('doThis');
+    const active = assignments.filter(a => !a.isDone);
+    
+    if (!active.length) {
+        el.innerHTML = '<p class="empty-msg">No assignments due — enjoy 🎉</p>';
+        return;
+    }
+    
+    let html = '';
+    for (const a of active) {
+        html += renderTaskCard(a, 'assignment');
+    }
+    el.innerHTML = html;
+    attachCardListeners(el);
+}
+
+// --- PREP: upcoming exams ---
+
+function renderPrep(exams) {
+    const el = document.getElementById('prepForThis');
+    const upcoming = exams.filter(e => !e.isDone);
+    
+    if (!upcoming.length) {
+        el.innerHTML = '<p class="empty-msg">No exams coming up</p>';
+        return;
+    }
+    
+    let html = '';
+    for (const e of upcoming) {
+        html += renderTaskCard(e, 'exam');
+    }
+    el.innerHTML = html;
+    attachCardListeners(el);
+}
+
+// --- NOW: today + next class (compact) ---
+
+function renderNow(assignments, exams) {
+    const el = document.getElementById('nowSection');
+    const all = [...assignments, ...exams].filter(d => !d.isDone);
+    const now = new Date();
+    const today = [];
+    const upcoming = [];
+    
+    for (const d of all) {
+        const days = daysUntil(d.dueDate);
+        if (days === 0) today.push(d);
+        else if (days !== null && days > 0 && days <= 3) upcoming.push(d);
+    }
+    
+    if (!today.length && !upcoming.length) {
+        el.innerHTML = '<p class="empty-msg">Nothing urgent</p>';
+        return;
+    }
+    
+    let html = '';
+    if (today.length) {
+        html += '<div class="now-group"><div class="now-label">📌 Due Today</div>';
+        for (const d of today) html += renderCompactCard(d);
+        html += '</div>';
+    }
+    if (upcoming.length) {
+        html += '<div class="now-group"><div class="now-label">⏰ Coming Up</div>';
+        for (const d of upcoming) html += renderCompactCard(d);
+        html += '</div>';
+    }
+    el.innerHTML = html;
+}
+
+// --- STATUS: completed + overdue ---
+
+function renderStatus(assignments, exams) {
+    const el = document.getElementById('statusSection');
+    const all = [...assignments, ...exams];
+    const done = all.filter(d => d.isDone).slice(0, 8);
+    const overdue = all.filter(d => !d.isDone && daysUntil(d.dueDate) !== null && daysUntil(d.dueDate) < 0);
+    
+    if (!done.length && !overdue.length) {
+        el.innerHTML = '<p class="empty-msg">Nothing to report</p>';
+        return;
+    }
+    
+    let html = '';
+    if (overdue.length) {
+        html += '<div class="status-group"><div class="status-label">⚠️ Overdue</div>';
+        for (const d of overdue) html += renderStatusItem(d, true);
+        html += '</div>';
+    }
+    if (done.length) {
+        html += '<div class="status-group"><div class="status-label">✅ Completed</div>';
+        for (const d of done) html += renderStatusItem(d, false);
+        html += '</div>';
+    }
+    el.innerHTML = html;
+    
+    // Attach ignore listeners
+    el.querySelectorAll('.ignore-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const key = btn.dataset.key;
+            ignoredDeadlines.add(key);
+            chrome.storage.local.get('scout_data').then(stored => {
+                const data = stored?.scout_data || {};
+                data.ignoredDeadlines = [...ignoredDeadlines];
+                chrome.storage.local.set({ scout_data: data });
+            });
+            const item = btn.closest('.status-item');
+            if (item) {
+                item.style.opacity = '0';
+                item.style.transform = 'translateX(20px)';
+                item.style.transition = 'all 0.3s';
+                setTimeout(() => renderDashboard(), 300);
+            }
+        });
+    });
 }
 
 // --- File bundling logic ---
@@ -771,191 +902,95 @@ function getThisWeekEnd() {
     return sunday;
 }
 
-function renderActionCenter() {
-    const el = document.getElementById('actionCenter');
-    el.innerHTML = '';
-    
-    const now = new Date();
-    const overdue = [];     // past due, not done
-    const today = [];       // due today
-    const nextClass = [];   // due on/around next class day
-    const thisWeek = [];    // due this week (after next class)
-    const nextWeek = [];    // due next week
-    const done = [];        // submitted/graded
-    
-    const weekEnd = getThisWeekEnd();
-    const nextWeekEnd = getNextWeekEnd();
-    
-    for (const [id, c] of Object.entries(courses)) {
-        const name = shortName(c), color = courseColor(id);
-        const nextClassDate = getNextClassDay(c);
-        
-        for (const d of (c.deadlines || [])) {
-            const days = daysUntil(d.dueDate);
-            if (days !== null && days < -14) continue;
-            
-            // Skip ignored
-            const dlKey = `${id}-${d.title}-${d.dueDate}`;
-            if (ignoredDeadlines.has(dlKey)) continue;
-            
-            const isDone = d.status === 'GRADED' || d.status === 'SUBMITTED';
-            const entry = { ...d, shortName: name, color, courseId: id, isDone, dlKey };
-            const dueDate = d.dueDate ? new Date(d.dueDate) : null;
-            
-            if (isDone) {
-                done.push(entry);
-            } else if (days !== null && days < 0) {
-                overdue.push(entry);
-            } else if (days === 0) {
-                today.push(entry);
-            } else if (nextClassDate && dueDate && 
-                       dueDate <= nextClassDate && days > 0) {
-                nextClass.push(entry);
-            } else if (dueDate && dueDate <= weekEnd) {
-                thisWeek.push(entry);
-            } else if (dueDate && dueDate <= nextWeekEnd) {
-                nextWeek.push(entry);
-            }
-        }
-    }
-    
-    const sortByDate = (a, b) => (a.dueDate || '').localeCompare(b.dueDate || '');
-    overdue.sort(sortByDate);
-    today.sort(sortByDate);
-    nextClass.sort(sortByDate);
-    thisWeek.sort(sortByDate);
-    nextWeek.sort(sortByDate);
-    
-    if (!overdue.length && !today.length && !nextClass.length && !thisWeek.length && !nextWeek.length && !done.length) {
-        el.innerHTML = '<p style="color:var(--text-dim);font-size:12px;text-align:center;padding:16px">Nothing due — enjoy your free time 🎉</p>';
-        return;
-    }
-    
-    let html = '';
-    
-    if (overdue.length) {
-        html += renderSection('⚠️ Overdue', 'overdue', overdue, true);
-    }
-    
-    if (today.length) {
-        html += renderSection('📌 Due Today', 'today', today, false);
-    }
-    
-    if (nextClass.length) {
-        const sampleCourse = courses[nextClass[0]?.courseId];
-        const nextDate = getNextClassDay(sampleCourse);
-        const dayName = nextDate ? ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][nextDate.getDay()] : '';
-        html += renderSection(`📚 Due Next Class${dayName ? ` (${dayName})` : ''}`, 'nextclass', nextClass, false);
-    }
-    
-    if (thisWeek.length) {
-        html += renderSection('📅 Due This Week', 'thisweek', thisWeek, false);
-    }
-    
-    if (nextWeek.length) {
-        html += renderSection('📆 Due Next Week', 'nextweek', nextWeek, false);
-    }
-    
-    if (done.length) {
-        html += renderSection('✅ Completed', 'done', done.slice(0, 8), false, true);
-    }
-    
-    el.innerHTML = html;
-    
-    // Attach collapse and ignore event listeners
-    el.querySelectorAll('.section-header').forEach(header => {
-        header.addEventListener('click', () => {
-            const content = header.nextElementSibling;
-            const arrow = header.querySelector('.collapse-arrow');
-            if (content) content.classList.toggle('collapsed');
-            if (arrow) arrow.classList.toggle('open');
-        });
-    });
-    
-    el.querySelectorAll('.ignore-btn').forEach(btn => {
-        btn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            const key = btn.dataset.key;
-            ignoredDeadlines.add(key);
-            chrome.storage.local.get('scout_data').then(stored => {
-                const data = stored?.scout_data || {};
-                data.ignoredDeadlines = [...ignoredDeadlines];
-                chrome.storage.local.set({ scout_data: data });
-            });
-            // Animate removal
-            const item = btn.closest('.action-item');
-            if (item) {
-                item.style.opacity = '0';
-                item.style.transform = 'translateX(20px)';
-                item.style.transition = 'all 0.3s';
-                setTimeout(() => renderActionCenter(), 300);
-            }
-        });
-    });
-}
+// --- Task card renderer ---
 
-function renderSection(title, id, items, showIgnore, isDone) {
-    let html = `<div class="section-block" data-section="${id}">`;
-    html += `<div class="section-header">`;
-    html += `<span class="collapse-arrow open">▼</span>`;
-    html += `<span>${title}</span>`;
-    html += `<span class="section-count">${items.length}</span>`;
-    html += `</div>`;
-    html += `<div class="section-content">`;
-    
-    for (const d of items) {
-        if (isDone) {
-            html += `<div class="action-item done" style="border-left-color:${d.color}">`;
-            html += `<div class="action-header">`;
-            html += `<div class="action-title done">${d.title}</div>`;
-            html += `<div class="action-meta"><span class="action-course" style="color:${d.color}">${d.shortName}</span>`;
-            html += `<span class="action-badge done">✓ ${d.status === 'GRADED' ? 'Graded' : 'Submitted'}</span></div>`;
-            html += `</div></div>`;
-        } else {
-            html += renderDeadlineBundle(d, showIgnore);
-        }
-    }
-    
-    html += `</div></div>`;
-    return html;
-}
-
-function renderDeadlineBundle(deadline, showIgnore) {
-    const days = daysUntil(deadline.dueDate);
+function renderTaskCard(entry, taskType) {
+    const days = daysUntil(entry.dueDate);
     let dayText = '';
     if (days === 0) dayText = 'Today';
     else if (days === 1) dayText = 'Tomorrow';
     else if (days > 1) dayText = `${days}d`;
     else dayText = `${Math.abs(days)}d ago`;
     
-    const course = courses[deadline.courseId];
-    const bundled = bundleFilesForDeadline(deadline, course?.files, course?.deadlines);
+    const course = courses[entry.courseId];
+    const bundled = bundleFilesForDeadline(entry, course?.files, course?.deadlines);
+    const isUrgent = days !== null && days <= 1;
+    const isOverdue = days !== null && days < 0;
     
-    const ignoreBtn = showIgnore ? `<button class="ignore-btn" data-key="${deadline.dlKey}" title="Ignore">✕</button>` : '';
+    const typeIcon = taskType === 'exam' ? '📝' : '📋';
     
-    let html = `<div class="action-item ${days !== null && days < 0 ? 'overdue' : ''}" style="border-left-color:${deadline.color}">`;
-    html += `<div class="action-header">`;
-    html += `<div class="action-title">${deadline.title}</div>`;
-    html += `<div class="action-meta">`;
-    html += `<span class="action-course" style="color:${deadline.color}">${deadline.shortName}</span>`;
-    html += `<span class="action-days ${days !== null && days <= 0 ? 'urgent' : days !== null && days <= 3 ? 'soon' : ''}">${dayText}</span>`;
-    html += ignoreBtn;
+    let html = `<div class="task-card ${isOverdue ? 'overdue' : ''}" style="border-left-color:${entry.color}">`;
+    html += `<div class="task-header" data-toggle>`;
+    html += `<div class="task-title">${typeIcon} ${entry.title}</div>`;
+    html += `<div class="task-meta">`;
+    html += `<span class="task-course" style="color:${entry.color}">${entry.shortName}</span>`;
+    html += `<span class="task-days ${isUrgent ? 'urgent' : ''}">${dayText}</span>`;
     html += `</div></div>`;
     
+    // Collapsible detail section
+    html += `<div class="task-detail collapsed">`;
+    
     if (bundled.length > 0) {
-        html += `<div class="action-files">`;
+        html += `<div class="task-files">`;
         for (const file of bundled) {
             const href = file.downloadUrl
                 ? (file.downloadUrl.startsWith('http') ? file.downloadUrl : `https://learn.bu.edu${file.downloadUrl}`)
                 : '#';
             const icon = getFileIcon(file.name);
-            html += `<a class="action-file" href="${href}" target="_blank">${icon} ${file.name}</a>`;
+            html += `<a class="task-file" href="${href}" target="_blank">${icon} ${file.name}</a>`;
         }
         html += `</div>`;
+    } else {
+        html += `<div class="task-no-files">No materials attached</div>`;
     }
     
+    html += `</div></div>`;
+    return html;
+}
+
+function renderCompactCard(entry) {
+    const days = daysUntil(entry.dueDate);
+    let dayText = '';
+    if (days === 0) dayText = 'Today';
+    else if (days === 1) dayText = 'Tomorrow';
+    else dayText = `${days}d`;
+    
+    const typeIcon = entry.type === 'exam' ? '📝' : '📋';
+    const isUrgent = days !== null && days <= 0;
+    
+    return `<div class="compact-card" style="border-left-color:${entry.color}">
+        <span class="compact-icon">${typeIcon}</span>
+        <span class="compact-title">${entry.title}</span>
+        <span class="compact-course" style="color:${entry.color}">${entry.shortName}</span>
+        <span class="compact-days ${isUrgent ? 'urgent' : ''}">${dayText}</span>
+    </div>`;
+}
+
+function renderStatusItem(entry, showIgnore) {
+    const isDone = entry.isDone;
+    const days = daysUntil(entry.dueDate);
+    const dayText = days !== null ? (days < 0 ? `${Math.abs(days)}d ago` : `${days}d`) : '';
+    
+    let html = `<div class="status-item ${isDone ? 'done' : 'overdue'}" style="border-left-color:${entry.color}">`;
+    html += `<span class="status-title">${entry.title}</span>`;
+    html += `<span class="status-course" style="color:${entry.color}">${entry.shortName}</span>`;
+    if (isDone) {
+        html += `<span class="status-badge done">✓ ${entry.status === 'GRADED' ? 'Graded' : 'Submitted'}</span>`;
+    } else {
+        html += `<span class="status-days overdue">${dayText}</span>`;
+        html += `<button class="ignore-btn" data-key="${entry.dlKey}" title="Ignore">✕</button>`;
+    }
     html += `</div>`;
     return html;
+}
+
+function attachCardListeners(el) {
+    el.querySelectorAll('.task-header').forEach(header => {
+        header.addEventListener('click', () => {
+            const detail = header.nextElementSibling;
+            if (detail) detail.classList.toggle('collapsed');
+        });
+    });
 }
 
 function getFileIcon(name) {
@@ -968,111 +1003,6 @@ function getFileIcon(name) {
     if (['py', 'ipynb', 'r', 'java'].includes(ext)) return '💻';
     if (['zip', 'rar', 'tar'].includes(ext)) return '📦';
     return '📄';
-}
-
-// --- New This Week ---
-
-function renderNewThisWeek() {
-    const el = document.getElementById('newThisWeek');
-    el.innerHTML = '';
-    
-    let hasContent = false;
-    const now = Date.now();
-    
-    for (const [id, c] of Object.entries(courses)) {
-        const color = courseColor(id);
-        const name = shortName(c);
-        
-        // Recent announcements (from course data — has dates)
-        const recentAnnouncements = (c.announcements || [])
-            .filter(a => {
-                if (!a.postedDate) return false;
-                const daysAgo = (now - new Date(a.postedDate).getTime()) / 86400000;
-                return daysAgo <= 7;
-            })
-            .sort((a, b) => (b.postedDate || '').localeCompare(a.postedDate || ''));
-        
-        // Recent activity from stream (content postings with real timestamps)
-        const recentActivity = activityStream
-            .filter(item => {
-                if (item.courseId !== id) return false;
-                if (!item.timestamp) return false;
-                const daysAgo = (now - new Date(item.timestamp).getTime()) / 86400000;
-                return daysAgo <= 7;
-            })
-            .sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
-        
-        if (!recentAnnouncements.length && !recentActivity.length) continue;
-        hasContent = true;
-        
-        let html = `<div class="new-course-block">`;
-        html += `<div class="new-course-name" style="color:${color}">${name}</div>`;
-        
-        // Stream items (content postings — these have real dates)
-        for (const item of recentActivity.slice(0, 5)) {
-            const icon = item.type === 'content' ? '📄' : item.type === 'grade' ? '📊' : item.type === 'discussion' ? '💬' : '📌';
-            const unseen = !item.seen ? ' unseen' : '';
-            const title = item.title || item.type;
-            const timeAgo = formatTimeAgo(item.timestamp);
-            html += `<div class="new-item stream${unseen}">${icon} ${title}<span class="new-item-time">${timeAgo}</span></div>`;
-        }
-        
-        // Announcements (as backup)
-        for (const a of recentAnnouncements.slice(0, 2)) {
-            const body = stripHtml(a.body || '').substring(0, 60);
-            html += `<div class="new-item announcement">📢 ${a.title}${body ? `<span class="new-item-preview"> — ${body}...</span>` : ''}</div>`;
-        }
-        
-        html += `</div>`;
-        el.innerHTML += html;
-    }
-    
-    if (!hasContent) {
-        el.innerHTML = '<p style="color:var(--text-dim);font-size:11px;text-align:center;padding:8px">Nothing new this week</p>';
-    }
-}
-
-function formatTimeAgo(timestamp) {
-    if (!timestamp) return '';
-    const diff = Date.now() - new Date(timestamp).getTime();
-    const hours = Math.floor(diff / 3600000);
-    if (hours < 1) return 'just now';
-    if (hours < 24) return `${hours}h ago`;
-    const days = Math.floor(hours / 24);
-    if (days === 1) return 'yesterday';
-    return `${days}d ago`;
-}
-
-// --- Grades ---
-
-function renderGrades() {
-    const el = document.getElementById('gradesList');
-    let html = '';
-    for (const [id, c] of Object.entries(courses)) {
-        if (!c.grades?.length) continue;
-        html += `<div class="grade-course"><div class="grade-course-name" style="color:${courseColor(id)}">${shortName(c)}</div>`;
-        for (const g of c.grades.slice(0, 10)) {
-            html += `<div class="grade-item"><span class="grade-name">${g.name}</span><span class="grade-score ${scoreClass(g.score, g.pointsPossible)}">${fmtScore(g)}</span></div>`;
-        }
-        html += '</div>';
-    }
-    el.innerHTML = html || '<p style="color:var(--text-dim);font-size:11px;text-align:center;padding:8px">No grades yet</p>';
-}
-
-// --- Announcements ---
-
-function renderAnnouncements() {
-    const el = document.getElementById('announcementsList');
-    const all = [];
-    for (const [id, c] of Object.entries(courses)) {
-        for (const a of (c.announcements || [])) all.push({ ...a, shortName: shortName(c) });
-    }
-    all.sort((a, b) => (b.postedDate || '').localeCompare(a.postedDate || ''));
-    if (!all.length) { el.innerHTML = '<p style="color:var(--text-dim);font-size:11px;text-align:center;padding:8px">No announcements</p>'; return; }
-    el.innerHTML = all.slice(0, 8).map(a => {
-        const body = stripHtml(a.body).substring(0, 100);
-        return `<div class="announcement-item ${a.isRead ? '' : 'unread'}"><div><span class="announcement-title">${a.title}</span> <span class="announcement-course">${a.shortName}</span></div><div class="announcement-body">${body}${body.length >= 100 ? '...' : ''}</div></div>`;
-    }).join('');
 }
 
 // --- Sync to server (backdoor) ---
