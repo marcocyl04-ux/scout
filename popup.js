@@ -30,6 +30,11 @@ function daysUntil(s) {
 function fmtScore(g) {
     if (g.score == null && g.grade) return g.grade;
     if (g.score == null) return '—';
+    // If pointsPossible seems wrong (score > possible, or possible is very low while score is high),
+    // show as percentage instead of misleading fraction
+    if (g.pointsPossible && g.score > g.pointsPossible && g.pointsPossible < 20) {
+        return `${g.score}%`;
+    }
     return g.pointsPossible ? `${g.score}/${g.pointsPossible}` : `${g.score}`;
 }
 function scoreClass(s, max) {
@@ -171,7 +176,10 @@ async function fetchAPI(path) {
     try {
         const resp = await fetch(url, {
             credentials: 'include',
-            headers: { 'Accept': 'application/json' }
+            headers: { 
+                'Accept': 'application/json',
+                'x-blackboard-xsrf': document.cookie.match(/x-blackboard-xsrf=([^;]+)/)?.[1] || ''
+            }
         });
         if (!resp.ok) return null;
         return await resp.json();
@@ -199,36 +207,41 @@ function discoverTerms(apiBodies) {
 }
 
 function findCurrentTerm(terms, courseList) {
-    // Strategy 1 (primary): Pick the term that contains today's date
+    // Build a map of termId → course count
+    const termCourseCounts = {};
+    for (const c of courseList) {
+        if (c.termId) termCourseCounts[c.termId] = (termCourseCounts[c.termId] || 0) + 1;
+    }
+    
+    // Strategy 1 (primary): Date-based, but prefer terms with actual courses
     if (terms.length > 0) {
         const now = new Date();
-        const current = terms.find(t => {
+        const dateMatches = terms.filter(t => {
             if (!t.startDate || !t.endDate) return false;
             return new Date(t.startDate) <= now && now <= new Date(t.endDate);
         });
-        if (current) return current;
         
-        // Strategy 2: Pick the most recent term by start date
+        // Among date-matching terms, pick the one with the most courses
+        if (dateMatches.length > 0) {
+            const withCourses = dateMatches
+                .filter(t => termCourseCounts[t.id] > 0)
+                .sort((a, b) => (termCourseCounts[b.id] || 0) - (termCourseCounts[a.id] || 0));
+            if (withCourses.length > 0) return withCourses[0];
+        }
+        
+        // Strategy 2: Any term with the most courses (regardless of date)
+        const termsWithCourses = terms.filter(t => termCourseCounts[t.id] > 0);
+        if (termsWithCourses.length > 0) {
+            return termsWithCourses.sort((a, b) => 
+                (termCourseCounts[b.id] || 0) - (termCourseCounts[a.id] || 0)
+            )[0];
+        }
+        
+        // Strategy 3: Most recent term by start date (last resort)
         const sorted = terms.filter(t => t.startDate).sort((a, b) => 
             new Date(b.startDate) - new Date(a.startDate)
         );
         if (sorted.length > 0) return sorted[0];
-    }
-    
-    // Strategy 3 (fallback): Count courses per termId (unreliable — old courses may still be available)
-    const termCounts = {};
-    const alwaysSkip = ['orientation', 'integrity', 'module', 'immigration', 'global_ped'];
-    
-    for (const c of courseList) {
-        if (alwaysSkip.some(kw => (c.displayId || '').toLowerCase().includes(kw))) continue;
-        if (c.termId) termCounts[c.termId] = (termCounts[c.termId] || 0) + 1;
-    }
-    
-    if (Object.keys(termCounts).length > 0) {
-        const bestId = Object.entries(termCounts).sort((a, b) => b[1] - a[1])[0][0];
-        const term = terms.find(t => t.id === bestId);
-        if (term) return term;
-        return { id: bestId, name: bestId };
     }
     
     return null; // No filter — show all courses
@@ -286,12 +299,14 @@ async function collectFiles(courseId, contentId, parentPath, depth = 0) {
                     });
                 } catch {}
             }
-            // Also treat the assessment itself as an item
+            // Store the assessment with its instructions text
+            const cleanInstructions = stripHtml(instructions).trim();
             files.push({
                 name: title,
                 path: itemPath,
                 depth: depth,
-                type: 'assessment'
+                type: 'assessment',
+                instructions: cleanInstructions.length > 20 ? cleanInstructions : null
             });
         } else if (handler === 'resource/x-bb-document') {
             files.push({
@@ -336,7 +351,11 @@ async function runExtraction() {
         const cid = r.courseId;
         if (r.role !== 'S' || !course.isAvailable || course.isClosed || seen.has(cid)) continue;
         const display = course.displayId || cid;
-        if (alwaysSkip.some(kw => display.toLowerCase().includes(kw))) continue;
+        const name = (course.name || '').toLowerCase();
+        const displayLower = display.toLowerCase();
+        if (alwaysSkip.some(kw => displayLower.includes(kw) || name.includes(kw))) continue;
+        // Also skip locked courses and non-credit modules
+        if (course.isLocked || course.isNonCredit) continue;
         seen.add(cid);
         courseList.push({ id: cid, displayId: display, termId: course.termId });
     }
@@ -366,6 +385,7 @@ async function runExtraction() {
     
     // Find and apply current term filter
     const currentTerm = findCurrentTerm(terms, courseList);
+    addLog(`Term filter: ${currentTerm ? (currentTerm.name || currentTerm.id) : 'none found'}`);
     
     if (currentTerm) {
         const termCourses = courseList.filter(c => c.termId === currentTerm.id);
@@ -389,61 +409,86 @@ async function runExtraction() {
         return;
     }
     
-    // Phase 2: Visit each course to capture grades, content, etc.
+    // Phase 2: Visit each course to capture content, then fetch grades/calendar directly
     courses = {};
     for (let i = 0; i < courseList.length; i++) {
         const course = courseList[i];
         addLog(`[${i+1}/${courseList.length}] Loading ${shortName(course)}...`);
         
-        // Visit outline (triggers content tree)
+        // Visit outline (triggers content tree + announcements capture via CDP)
         await navigateAndWait(`https://learn.bu.edu/ultra/courses/${course.id}/outline`, 3000);
         
-        // Visit grades page (triggers gradebook API)
+        // Fetch grades and calendar directly via API (no navigation needed)
         addLog(`  Grades...`);
-        await navigateAndWait(`https://learn.bu.edu/ultra/courses/${course.id}/grades`, 2000);
+        const gradesData = await fetchAPI(`/learn/api/v1/courses/${course.id}/gradebook/grades?limit=100`);
         
-        // Visit announcements page (triggers announcements API)
-        addLog(`  Announcements...`);
-        await navigateAndWait(`https://learn.bu.edu/ultra/courses/${course.id}/announcements`, 2000);
-        
-        // Visit calendar page (triggers calendarItems API)
         addLog(`  Calendar...`);
-        await navigateAndWait(`https://learn.bu.edu/ultra/courses/${course.id}/calendar`, 2000);
+        const calendarData = await fetchAPI(`/learn/api/v1/courses/${course.id}/calendars/calendarItems?limit=100`);
         
         const data = { grades: [], deadlines: [], announcements: [], files: [] };
         
-        for (const [url, body] of Object.entries(apiBodies)) {
-            if (!url.includes(course.id)) continue;
-            
-            // Grades
-            if (url.includes('gradebook/grades') && body?.results) {
-                for (const r of body.results) {
-                    const col = r.column || {};
-                    const display = r.displayGrade || {};
-                    if (!data.grades.find(g => g.columnId === r.columnId)) {
-                        data.grades.push({
-                            columnId: r.columnId,
-                            name: col.effectiveColumnName || 'Unknown',
-                            score: display.score,
-                            grade: display.grade,
-                            pointsPossible: r.pointsPossible,
+        // Process grades from direct fetch
+        if (gradesData?.results) {
+            for (const r of gradesData.results) {
+                const col = r.column || {};
+                const display = r.displayGrade || {};
+                if (!data.grades.find(g => g.columnId === r.columnId)) {
+                    data.grades.push({
+                        columnId: r.columnId,
+                        name: col.effectiveColumnName || 'Unknown',
+                        score: display.score,
+                        grade: display.grade,
+                        pointsPossible: r.pointsPossible,
+                        status: r.submissionStatus?.status,
+                        dueDate: col.dueDate
+                    });
+                    if (col.effectiveColumnName && col.dueDate) {
+                        data.deadlines.push({
+                            title: col.effectiveColumnName,
+                            dueDate: col.dueDate,
+                            source: 'gradebook',
                             status: r.submissionStatus?.status,
-                            dueDate: col.dueDate
+                            type: classifyDeadline(col.effectiveColumnName)
                         });
-                        if (col.effectiveColumnName && col.dueDate) {
-                            data.deadlines.push({
-                                title: col.effectiveColumnName,
-                                dueDate: col.dueDate,
-                                source: 'gradebook',
-                                status: r.submissionStatus?.status,
-                                type: classifyDeadline(col.effectiveColumnName)
-                            });
-                        }
+                    }
+                }
+            }
+        }
+        
+        // Process calendar from direct fetch
+        if (calendarData?.results) {
+            const existingTitles = new Set(data.deadlines.map(d => d.title));
+            const dayFrequency = [0, 0, 0, 0, 0, 0, 0];
+            
+            for (const item of calendarData.results) {
+                if (item.title && item.endDate && !existingTitles.has(item.title)) {
+                    data.deadlines.push({ title: item.title, dueDate: item.endDate, source: 'calendar', type: classifyDeadline(item.title) });
+                    existingTitles.add(item.title);
+                }
+                if (item.startDate) {
+                    const start = new Date(item.startDate);
+                    const end = item.endDate ? new Date(item.endDate) : null;
+                    const durationHours = end ? (end - start) / 3600000 : 0;
+                    if (durationHours > 0 && durationHours <= 4) {
+                        dayFrequency[start.getDay()]++;
                     }
                 }
             }
             
-            // Announcements
+            const meetingDays = [];
+            const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+            for (let d = 0; d < 7; d++) {
+                if (dayFrequency[d] >= 2) meetingDays.push(d);
+            }
+            data.meetingDays = meetingDays;
+            data.meetingDaysNames = meetingDays.map(d => dayNames[d]);
+        }
+        
+        // Also grab any grades/calendar captured via CDP (may have more data)
+        for (const [url, body] of Object.entries(apiBodies)) {
+            if (!url.includes(course.id)) continue;
+            
+            // Announcements (only from CDP — not fetched directly)
             if (url.includes('announcements?') && body?.results) {
                 for (const item of body.results) {
                     const b = item.body || {};
@@ -458,44 +503,6 @@ async function runExtraction() {
                     }
                 }
             }
-            
-            // Calendar events — capture deadlines AND detect class meeting days
-            if (url.includes('calendarItems') && body?.results) {
-                const existingTitles = new Set(data.deadlines.map(d => d.title));
-                const dayFrequency = [0, 0, 0, 0, 0, 0, 0]; // Sun-Sat
-                
-                for (const item of body.results) {
-                    // Capture as deadline if it has an end date
-                    if (item.title && item.endDate && !existingTitles.has(item.title)) {
-                        data.deadlines.push({ title: item.title, dueDate: item.endDate, source: 'calendar', type: classifyDeadline(item.title) });
-                        existingTitles.add(item.title);
-                    }
-                    
-                    // Detect class meeting days from recurring events
-                    // Class sessions typically have a startDate, are shorter events (< 4 hours)
-                    // and recur on the same day of the week
-                    if (item.startDate) {
-                        const start = new Date(item.startDate);
-                        const end = item.endDate ? new Date(item.endDate) : null;
-                        const durationHours = end ? (end - start) / 3600000 : 0;
-                        
-                        // Class sessions are typically 1-3 hours
-                        if (durationHours > 0 && durationHours <= 4) {
-                            dayFrequency[start.getDay()]++;
-                        }
-                    }
-                }
-                
-                // Store detected meeting days on data
-                // A day is a "meeting day" if it appears 2+ times (recurring pattern)
-                const meetingDays = [];
-                const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-                for (let i = 0; i < 7; i++) {
-                    if (dayFrequency[i] >= 2) meetingDays.push(i);
-                }
-                data.meetingDays = meetingDays;
-                data.meetingDaysNames = meetingDays.map(d => dayNames[d]);
-            }
         }
         
         // Nested file traversal via direct API fetch
@@ -508,6 +515,9 @@ async function runExtraction() {
         courses[course.id] = { ...course, ...data };
         addLog(`  ${data.grades.length} grades, ${data.deadlines.length} deadlines, ${data.announcements.length} announcements${data.meetingDaysNames?.length ? ', meets: ' + data.meetingDaysNames.join('/') : ''}`);
     }
+    
+    // Match assessment instructions to deadlines
+    matchInstructionsToDeadlines();
     
     // Phase 3: Process activity stream from CDP-captured data
     addLog('Processing activity stream...');
@@ -624,10 +634,55 @@ async function runExtraction() {
             extractedAt: Date.now()
         }
     });
+    // Set freshness data attribute
+    const metaEl = document.getElementById('meta');
+    if (metaEl) metaEl.dataset.extractedAt = Date.now();
     addLog('Data saved locally ✓');
     
     renderDashboard();
     syncToServer();
+}
+
+// --- Match assessment instructions to deadlines ---
+
+function findAssessmentsWithInstructions(items, results) {
+    if (!items) return results;
+    for (const item of items) {
+        if (item.type === 'assessment' && item.instructions) {
+            results.push({ name: item.name, instructions: item.instructions });
+        }
+        if (item.children) findAssessmentsWithInstructions(item.children, results);
+    }
+    return results;
+}
+
+function matchInstructionsToDeadlines() {
+    for (const [id, c] of Object.entries(courses)) {
+        const assessments = findAssessmentsWithInstructions(c.files || [], []);
+        if (!assessments.length) continue;
+        
+        for (const dl of (c.deadlines || [])) {
+            if (dl.instructions) continue; // already has instructions
+            const dlTitle = (dl.title || '').toLowerCase();
+            
+            for (const a of assessments) {
+                const aName = (a.name || '').toLowerCase();
+                // Exact or substring match
+                if (dlTitle === aName || dlTitle.includes(aName) || aName.includes(dlTitle)) {
+                    dl.instructions = a.instructions;
+                    break;
+                }
+                // Word overlap (at least 2 significant words in common)
+                const dlWords = dlTitle.split(/\s+/).filter(w => w.length > 3);
+                const aWords = aName.split(/\s+/).filter(w => w.length > 3);
+                const overlap = dlWords.filter(w => aWords.includes(w));
+                if (overlap.length >= 2) {
+                    dl.instructions = a.instructions;
+                    break;
+                }
+            }
+        }
+    }
 }
 
 function countFiles(items) {
@@ -649,7 +704,19 @@ function renderDashboard() {
     const courseCount = Object.keys(courses).length;
     const totalDeadlines = Object.values(courses).reduce((s, c) => s + (c.deadlines?.length || 0), 0);
     
-    document.getElementById('meta').textContent = `${courseCount} courses · ${totalDeadlines} deadlines`;
+    // Show data freshness
+    let freshness = '';
+    // Try to get extraction time from the meta element's data attribute
+    const metaEl = document.getElementById('meta');
+    const extractedAt = metaEl?.dataset?.extractedAt;
+    if (extractedAt) {
+        const ageMin = Math.floor((Date.now() - parseInt(extractedAt)) / 60000);
+        if (ageMin < 1) freshness = ' · just now';
+        else if (ageMin < 60) freshness = ` · ${ageMin}m ago`;
+        else freshness = ` · ${Math.floor(ageMin/60)}h ago`;
+    }
+    
+    document.getElementById('meta').textContent = `${courseCount} courses · ${totalDeadlines} deadlines${freshness}`;
     
     // Split deadlines by type
     const assignments = [];
@@ -747,7 +814,32 @@ function renderDoThis(assignments) {
         return;
     }
     
-    el.innerHTML = filtered.map(a => renderTaskCard(a, 'assignment')).join('');
+    // Group by course
+    const grouped = {};
+    for (const a of filtered) {
+        const key = a.shortName;
+        if (!grouped[key]) grouped[key] = { color: a.color, courseId: a.courseId, items: [] };
+        grouped[key].items.push(a);
+    }
+    
+    // Sort groups by earliest deadline
+    const sortedGroups = Object.entries(grouped).sort((a, b) => {
+        const aEarliest = a[1].items[0]?.dueDate || '9999';
+        const bEarliest = b[1].items[0]?.dueDate || '9999';
+        return aEarliest.localeCompare(bEarliest);
+    });
+    
+    let html = '';
+    for (const [name, group] of sortedGroups) {
+        html += `<div class="course-group">`;
+        html += `<div class="course-group-header" style="color:${group.color}">${name} <span class="course-group-count">${group.items.length}</span></div>`;
+        for (const a of group.items) {
+            html += renderTaskCard(a, 'assignment');
+        }
+        html += `</div>`;
+    }
+    
+    el.innerHTML = html;
     attachCardListeners(el);
 }
 
@@ -984,9 +1076,24 @@ function renderTaskCard(entry, taskType) {
             html += `<a class="task-file" href="${href}" target="_blank">${icon} ${file.name}</a>`;
         }
         html += `</div>`;
+        html += `<div class="task-file-note">Files open in Blackboard — log in to download</div>`;
     } else {
         html += `<div class="task-no-files">No materials attached</div>`;
     }
+    
+    // Show assessment instructions if available
+    if (entry.instructions) {
+        html += `<div class="task-instructions"><div class="task-instructions-label">📋 Instructions</div><div class="task-instructions-text">${entry.instructions}</div></div>`;
+    }
+    
+    // AI prompt button
+    html += `<div class="task-actions">`;
+    html += `<button class="ai-prompt-btn" data-title="${entry.title.replace(/"/g, '&quot;')}" data-course="${entry.shortName}" data-instructions="${(entry.instructions || '').replace(/"/g, '&quot;').replace(/\n/g, ' ').slice(0, 500)}" data-files="${bundled.map(f => f.name).join(', ')}">🤖 Ask AI</button>`;
+    html += `</div>`;
+    html += `<div class="ai-prompt-preview hidden">`;
+    html += `<textarea class="ai-prompt-text" rows="6"></textarea>`;
+    html += `<div class="ai-prompt-actions"><button class="ai-copy-btn">📋 Copy</button><button class="ai-close-btn">✕</button></div>`;
+    html += `</div>`;
     
     html += `</div></div>`;
     return html;
@@ -1033,6 +1140,47 @@ function attachCardListeners(el) {
         header.addEventListener('click', () => {
             const detail = header.nextElementSibling;
             if (detail) detail.classList.toggle('collapsed');
+        });
+    });
+    
+    el.querySelectorAll('.ai-prompt-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const title = btn.dataset.title;
+            const course = btn.dataset.course;
+            const instructions = btn.dataset.instructions;
+            const files = btn.dataset.files;
+            
+            let prompt = `Help me with this assignment for ${course}:\n\n"${title}"`;
+            if (instructions) prompt += `\n\nInstructions:\n${instructions}`;
+            if (files) prompt += `\n\nRelevant files: ${files}`;
+            prompt += `\n\nPlease help me understand what's required and how to approach this.`;
+            
+            // Show preview
+            const preview = btn.closest('.task-actions').nextElementSibling;
+            const textarea = preview.querySelector('.ai-prompt-text');
+            textarea.value = prompt;
+            preview.classList.remove('hidden');
+            textarea.focus();
+            textarea.select();
+        });
+    });
+    
+    el.querySelectorAll('.ai-copy-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const textarea = btn.closest('.ai-prompt-preview').querySelector('.ai-prompt-text');
+            navigator.clipboard.writeText(textarea.value).then(() => {
+                btn.textContent = '✓ Copied!';
+                setTimeout(() => { btn.textContent = '📋 Copy'; }, 2000);
+            });
+        });
+    });
+    
+    el.querySelectorAll('.ai-close-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            btn.closest('.ai-prompt-preview').classList.add('hidden');
         });
     });
 }
@@ -1094,11 +1242,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     
     if (data?.courses && data?.extractedAt) {
         const ageMin = (Date.now() - data.extractedAt) / 60000;
-        if (ageMin < 60) {
+        if (ageMin < 120) {
             courses = data.courses;
             allResponses = data.allResponses || {};
             activityStream = data.activityStream || [];
             ignoredDeadlines = new Set(data.ignoredDeadlines || []);
+            // Store extraction time for freshness display
+            const metaEl = document.getElementById('meta');
+            if (metaEl) metaEl.dataset.extractedAt = data.extractedAt;
             startScreen.classList.add('hidden');
             renderDashboard();
             return;

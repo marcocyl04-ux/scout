@@ -116,6 +116,11 @@ header { display: flex; justify-content: space-between; align-items: center; pad
 .section-title.status { color: var(--text-dim); }
 .empty-msg { color: var(--text-dim); font-size: 12px; text-align: center; padding: 16px 0; }
 
+/* Course Groups */
+.course-group { margin-bottom: 12px; }
+.course-group-header { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px; padding: 6px 0 4px; display: flex; align-items: center; gap: 6px; }
+.course-group-count { font-size: 10px; font-weight: 500; background: var(--surface); padding: 1px 6px; border-radius: 8px; opacity: 0.7; }
+
 /* Task Cards */
 .task-card { background: var(--surface); border-radius: 8px; border-left: 3px solid var(--border); margin-bottom: 6px; overflow: hidden; }
 .task-card.overdue { border-left-color: var(--red); }
@@ -126,11 +131,26 @@ header { display: flex; justify-content: space-between; align-items: center; pad
 .task-course { font-size: 10px; font-weight: 600; }
 .task-days { font-size: 11px; font-weight: 600; color: var(--text-dim); margin-left: auto; }
 .task-days.urgent { color: var(--red); }
-.task-detail { padding: 0 12px; max-height: 200px; overflow: hidden; transition: max-height 0.2s ease, padding 0.2s ease; }
-.task-detail.collapsed { max-height: 0; padding: 0 12px; }
+.task-detail { padding: 0 12px; transition: max-height 0.2s ease, padding 0.2s ease; }
+.task-detail.collapsed { max-height: 0; padding: 0 12px; overflow: hidden; }
 .task-files { padding: 8px 0; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 3px; }
 .task-file { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-dim); text-decoration: none; padding: 2px 0; }
 .task-file:hover { color: var(--accent); }
+.task-file-note { font-size: 9px; color: var(--text-dim); opacity: 0.6; padding: 2px 0 0; }
+.task-instructions { padding: 8px 0; border-top: 1px solid var(--border); }
+.task-instructions-label { font-size: 10px; font-weight: 700; text-transform: uppercase; color: var(--text-dim); margin-bottom: 4px; letter-spacing: 0.3px; }
+.task-instructions-text { font-size: 11px; color: var(--text-dim); line-height: 1.5; white-space: pre-wrap; }
+.task-actions { padding: 6px 0; border-top: 1px solid var(--border); display: flex; gap: 6px; }
+.ai-prompt-btn { font-size: 11px; padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface); color: var(--text-dim); cursor: pointer; transition: all 0.15s; }
+.ai-prompt-btn:hover { color: var(--accent); border-color: var(--accent); }
+.ai-prompt-btn.copied { color: var(--green); border-color: var(--green); }
+.ai-prompt-preview { padding: 8px 0; }
+.ai-prompt-preview.hidden { display: none; }
+.ai-prompt-text { width: 100%; font-size: 11px; line-height: 1.5; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 8px; resize: vertical; font-family: inherit; box-sizing: border-box; }
+.ai-prompt-actions { display: flex; gap: 6px; margin-top: 6px; }
+.ai-copy-btn { font-size: 11px; padding: 4px 10px; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }
+.ai-copy-btn:hover { opacity: 0.8; }
+.ai-close-btn { font-size: 11px; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface); color: var(--text-dim); cursor: pointer; }
 .task-no-files { font-size: 11px; color: var(--text-dim); padding: 6px 0; font-style: italic; }
 
 /* Compact Cards (NOW section) */
