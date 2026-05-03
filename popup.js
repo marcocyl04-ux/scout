@@ -311,7 +311,7 @@ async function runExtraction() {
     
     // Phase 1: Navigate to course list
     addLog('Loading course list...');
-    await navigateAndWait('https://learn.bu.edu/ultra/course', 8000);
+    await navigateAndWait('https://learn.bu.edu/ultra/course', 4000);
     
     // Discover courses
     const memberUrl = Object.keys(apiBodies).find(u => u.includes('memberships'));
@@ -391,19 +391,19 @@ async function runExtraction() {
         addLog(`[${i+1}/${courseList.length}] Loading ${shortName(course)}...`);
         
         // Visit outline (triggers content tree)
-        await navigateAndWait(`https://learn.bu.edu/ultra/courses/${course.id}/outline`, 5000);
+        await navigateAndWait(`https://learn.bu.edu/ultra/courses/${course.id}/outline`, 3000);
         
         // Visit grades page (triggers gradebook API)
         addLog(`  Grades...`);
-        await navigateAndWait(`https://learn.bu.edu/ultra/courses/${course.id}/grades`, 4000);
+        await navigateAndWait(`https://learn.bu.edu/ultra/courses/${course.id}/grades`, 2000);
         
         // Visit announcements page (triggers announcements API)
         addLog(`  Announcements...`);
-        await navigateAndWait(`https://learn.bu.edu/ultra/courses/${course.id}/announcements`, 4000);
+        await navigateAndWait(`https://learn.bu.edu/ultra/courses/${course.id}/announcements`, 2000);
         
         // Visit calendar page (triggers calendarItems API)
         addLog(`  Calendar...`);
-        await navigateAndWait(`https://learn.bu.edu/ultra/courses/${course.id}/calendar`, 4000);
+        await navigateAndWait(`https://learn.bu.edu/ultra/courses/${course.id}/calendar`, 2000);
         
         const data = { grades: [], deadlines: [], announcements: [], files: [] };
         
