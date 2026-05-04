@@ -106,7 +106,6 @@ function renderDashboard() {
         }
     }
 
-    renderThisWeek(assignments, exams);
     renderUpcoming(assignments, exams);
     renderLog(assignments, exams);
     updateGreeting();
@@ -124,55 +123,16 @@ function renderDashboard() {
     document.getElementById('dashboard').classList.remove('hidden');
 }
 
-// --- This Week ---
-function renderThisWeek(assignments, exams) {
-    const el = document.getElementById('thisweek');
-    const all = [...assignments, ...exams].filter(d => !d.isDone);
-    const tomorrow = [], week = [];
-    for (const d of all) {
-        const days = daysUntil(d.dueDate);
-        if (days !== null && days <= 1) tomorrow.push(d);
-        else if (days !== null && days > 1 && days <= 7) week.push(d);
-    }
-    if (!tomorrow.length && !week.length) {
-        el.innerHTML = '<p class="empty-msg">Nothing this week</p>';
-        return;
-    }
-    let html = '';
-    if (tomorrow.length) {
-        html += '<div class="section-label">due tomorrow</div>';
-        for (const d of tomorrow) html += renderThisWeekRow(d);
-    }
-    if (week.length) {
-        if (tomorrow.length) html += '<div class="divider"></div>';
-        html += '<div class="section-label">this week</div>';
-        for (const d of week) html += renderThisWeekRow(d);
-    }
-    el.innerHTML = html;
-    attachExpandListeners(el);
-}
 
-function renderThisWeekRow(entry) {
-    const days = daysUntil(entry.dueDate);
-    let dayText = days === 0 ? 'Today' : days === 1 ? 'Tomorrow' : `${days}d`;
-    const isUrgent = days !== null && days <= 1;
-    const course = courses[entry.courseId];
-    const bundled = bundleFilesForDeadline(entry, course?.files);
-    let html = `<div class="row"><div class="row-head">`;
-    html += `<span class="row-title">${entry.title}</span>`;
-    html += `<span class="row-course" style="color:${entry.color}">${entry.shortName}</span>`;
-    html += `<span class="row-due${isUrgent ? ' urgent' : ''}">${dayText}</span>`;
-    html += `<span class="row-arrow">&#9654;</span></div>`;
-    html += `<div class="row-detail"><div class="row-detail-inner">`;
-    html += renderExpandContent(entry, bundled);
-    html += `</div></div></div>`;
-    return html;
-}
 
 // --- Upcoming ---
 function renderUpcoming(assignments, exams) {
     const el = document.getElementById('upcoming');
-    const all = [...assignments, ...exams].filter(d => !d.isDone);
+    const all = [...assignments, ...exams].filter(d => {
+        if (d.isDone) return false;
+        const days = daysUntil(d.dueDate);
+        return days === null || days >= 0;
+    });
     if (!all.length) { el.innerHTML = '<p class="empty-msg">Nothing upcoming</p>'; return; }
     const grouped = {};
     for (const d of all) {
