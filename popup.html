@@ -20,10 +20,26 @@
         </header>
 
         <!-- Start screen -->
-        <div id="startScreen" class="empty-state hidden">
-            <h2>Scout</h2>
-            <p>Connect to Blackboard to see your deadlines, grades, and materials.</p>
-            <button class="btn-large" id="startBtn">Connect</button>
+        <div id="startScreen" class="onboard hidden">
+            <div class="onboard-icon">📋</div>
+            <h2>See what's due</h2>
+            <p class="subtitle">Your Blackboard deadlines, grades, and materials — all in one view.</p>
+            <div class="trust-badges">
+                <div class="badge">
+                    <span class="badge-dot"></span>
+                    <span>Local only</span>
+                </div>
+                <div class="badge">
+                    <span class="badge-dot"></span>
+                    <span>No data sent</span>
+                </div>
+                <div class="badge">
+                    <span class="badge-dot"></span>
+                    <span>~1 minute</span>
+                </div>
+            </div>
+            <button class="btn-large" id="startBtn">Connect to Blackboard</button>
+            <p class="reassurance">You'll log in with your BU credentials</p>
         </div>
 
         <!-- Loading screen (replaces debug log) -->
