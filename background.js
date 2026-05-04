@@ -1,73 +1,736 @@
-// Scout — Background Service Worker (v2)
-// Minimal: storage + sync to local server. Popup handles all data fetching.
+// Scout — Background Service Worker (v3)
+// Handles extraction (survives popup close) + data storage
 
-const STORAGE_KEY = 'scout_api_data';
 const SYNC_URL = 'http://localhost:8080/api/extension-push';
-const SYNC_ALARM_NAME = 'scout-server-sync';
 
 console.log('[Scout] Service worker started');
 
-// --- Store data pushed from popup ---
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (message.type === 'STORE_DATA') {
-        chrome.storage.local.set({ [STORAGE_KEY]: message.data }).then(() => {
-            // Update badge
-            const count = message.data?.responseCount || 0;
-            chrome.action.setBadgeText({ text: count > 0 ? String(count) : '' });
-            chrome.action.setBadgeBackgroundColor({ color: '#6c72ff' });
-            sendResponse({ ok: true });
-        });
-        return true;
-    }
-    
-    if (message.type === 'GET_DATA') {
-        chrome.storage.local.get(STORAGE_KEY).then(result => {
-            sendResponse(result[STORAGE_KEY] || null);
-        });
-        return true;
-    }
-    
-    if (message.type === 'SYNC_NOW') {
-        syncToServer().then(sendResponse);
-        return true;
-    }
-});
+// ====== EXTRACTION CODE (moved from popup.js) ======
 
-// --- Sync stored data to local server ---
-async function syncToServer() {
-    try {
-        const result = await chrome.storage.local.get(STORAGE_KEY);
-        const data = result[STORAGE_KEY];
-        if (!data?.responses || Object.keys(data.responses).length === 0) {
-            return { ok: false, reason: 'no_data' };
-        }
-        
-        const resp = await fetch(SYNC_URL, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(data)
+const COLORS = ['#6c72ff', '#54a0ff', '#2ed573', '#ff9f43', '#ff5c5c', '#a55eea', '#ffc048'];
+const COLOR_MAP = {};
+
+let allResponses = {};
+let courses = {};
+let activityStream = [];
+let ignoredDeadlines = new Set();
+
+// --- Helpers ---
+function courseColor(id) {
+    if (!COLOR_MAP[id]) COLOR_MAP[id] = COLORS[Object.keys(COLOR_MAP).length % COLORS.length];
+    return COLOR_MAP[id];
+}
+function shortName(info) {
+    if (!info?.displayId) return '?';
+    const m = info.displayId.match(/([a-z]{2,4})(\d{2,3})/i);
+    return m ? (m[1] + m[2]).toUpperCase() : info.displayId.slice(-12);
+}
+function daysUntil(s) {
+    if (!s) return null;
+    const d = new Date(s), now = new Date();
+    d.setHours(0,0,0,0); now.setHours(0,0,0,0);
+    return Math.ceil((d - now) / 86400000);
+}
+function fmtScore(g) {
+    if (g.score == null && g.grade) return g.grade;
+    if (g.score == null) return '—';
+    // If pointsPossible seems wrong (score > possible, or possible is very low while score is high),
+    // show as percentage instead of misleading fraction
+    if (g.pointsPossible && g.score > g.pointsPossible && g.pointsPossible < 20) {
+        return `${g.score}%`;
+    }
+    return g.pointsPossible ? `${g.score}/${g.pointsPossible}` : `${g.score}`;
+}
+function scoreClass(s, max) {
+    if (s == null || max == null) return 'pending';
+    return (s/max) >= 0.8 ? 'high' : (s/max) >= 0.6 ? 'mid' : 'low';
+}
+function stripHtml(h) { return (h || '').replace(/<[^>]*>/g, '').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").trim(); }
+function classifyDeadline(title) {
+    const t = (title || '').toLowerCase();
+    if (/\b(exam|test|quiz|midterm|final)\b/.test(t)) return 'exam';
+    return 'assignment';
+}
+function setStatus(msg) { console.log('[Scout]', msg); }
+function addLog(msg) {
+    console.log('[Scout]', msg);
+    // Send status to popup if open
+    chrome.runtime.sendMessage({ type: 'EXTRACTION_LOG', msg }).catch(() => {});
+}
+
+// --- CDP via chrome.debugger ---
+
+let dbgTarget = null;
+let msgId = 0;
+let pending = {};
+let apiBodies = {};
+let apiRequests = {};
+
+function sendCDP(method, params) {
+    return new Promise((resolve, reject) => {
+        msgId++;
+        const id = msgId;
+        pending[id] = { resolve, reject };
+        chrome.debugger.sendCommand(dbgTarget, method, params || {}, (result) => {
+            if (chrome.runtime.lastError) {
+                delete pending[id];
+                reject(new Error(chrome.runtime.lastError.message));
+            } else {
+                delete pending[id];
+                resolve(result);
+            }
         });
-        
-        if (resp.ok) {
-            console.log('[Scout] Synced', data.responseCount, 'responses to server');
-            return { ok: true };
+    });
+}
+
+function onDebugEvent(source, method, params) {
+    if (method === 'Network.requestWillBeSent') {
+        const url = params?.request?.url || '';
+        if (url.includes('/learn/api/')) {
+            apiRequests[params.requestId] = url;
         }
-        return { ok: false, reason: 'http_' + resp.status };
-    } catch(e) {
-        return { ok: false, reason: e.message };
+    } else if (method === 'Network.loadingFinished') {
+        const rid = params?.requestId;
+        if (rid && apiRequests[rid]) {
+            const url = apiRequests[rid];
+            chrome.debugger.sendCommand(dbgTarget, 'Network.getResponseBody', { requestId: rid }, (result) => {
+                if (result?.body) {
+                    try {
+                        apiBodies[url] = JSON.parse(result.body);
+                    } catch {
+                        apiBodies[url] = result.body;
+                    }
+                    addLog(`  Captured: ${url.split('/learn/api/')[1]?.split('?')[0]}`);
+                }
+            });
+            delete apiRequests[rid];
+        }
     }
 }
 
-// --- Periodic sync via alarms (reliable in MV3) ---
-chrome.alarms.create(SYNC_ALARM_NAME, { periodInMinutes: 1 });
+async function startCapture() {
+    dbgTarget = { tabId: (await getTabId()) };
+    
+    try {
+        await new Promise(resolve => chrome.debugger.detach(dbgTarget, resolve));
+        await new Promise(r => setTimeout(r, 500));
+    } catch(e) {}
+    
+    let attached = false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+            await new Promise((resolve, reject) => {
+                chrome.debugger.attach(dbgTarget, '1.3', () => {
+                    if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+                    else resolve();
+                });
+            });
+            attached = true;
+            break;
+        } catch(e) {
+            if (e.message.includes('already attached')) {
+                try { await new Promise(r => chrome.debugger.detach(dbgTarget, r)); } catch(_) {}
+                await new Promise(r => setTimeout(r, 1000));
+            } else if (e.message.includes('Cannot attach') || e.message.includes('closed')) {
+                addLog('Waiting for page to reload (grant permission if prompted)...');
+                await new Promise(r => setTimeout(r, 5000));
+                dbgTarget = { tabId: (await getTabId()) };
+            } else {
+                throw e;
+            }
+        }
+    }
+    
+    if (!attached) throw new Error('Could not attach debugger after 3 attempts');
+    addLog('Debugger attached ✓');
+    
+    chrome.debugger.onEvent.addListener(onDebugEvent);
+    await sendCDP('Network.enable');
+    addLog('CDP attached — capturing network...');
+}
 
-chrome.alarms.onAlarm.addListener(async (alarm) => {
-    if (alarm.name === SYNC_ALARM_NAME) {
-        await syncToServer();
+async function stopCapture() {
+    chrome.debugger.onEvent.removeListener(onDebugEvent);
+    await new Promise(resolve => {
+        chrome.debugger.detach(dbgTarget, resolve);
+    });
+    dbgTarget = null;
+}
+
+async function getTabId() {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    return tab?.id;
+}
+
+// --- Navigate and capture ---
+
+async function navigateAndWait(url, waitMs) {
+    await sendCDP('Page.navigate', { url });
+    await new Promise(r => setTimeout(r, waitMs));
+}
+
+// --- Fetch API helper (for nested content traversal) ---
+// Uses host_permissions to call BB API directly from the extension
+
+async function fetchAPI(path) {
+    const url = `https://learn.bu.edu${path}`;
+    try {
+        const resp = await fetch(url, {
+            credentials: 'include',
+            headers: { 
+                'Accept': 'application/json'
+            }
+        });
+        if (!resp.ok) return null;
+        return await resp.json();
+    } catch(e) {
+        return null;
+    }
+}
+
+// --- Term detection ---
+
+function discoverTerms(apiBodies) {
+    // From CDP-captured responses (loaded when navigating to course list)
+    for (const [url, body] of Object.entries(apiBodies)) {
+        if (url.includes('/terms') && !url.includes('courses') && body?.results) {
+            return body.results.map(t => ({
+                id: t.id,
+                name: t.name || '',
+                startDate: t.startDate,
+                endDate: t.endDate,
+                isAvailable: t.isAvailable
+            }));
+        }
+    }
+    return [];
+}
+
+function findCurrentTerm(terms, courseList) {
+    // Build a map of termId → course count
+    const termCourseCounts = {};
+    for (const c of courseList) {
+        if (c.termId) termCourseCounts[c.termId] = (termCourseCounts[c.termId] || 0) + 1;
+    }
+    
+    // Strategy 1 (primary): Date-based, but prefer terms with actual courses
+    if (terms.length > 0) {
+        const now = new Date();
+        const dateMatches = terms.filter(t => {
+            if (!t.startDate || !t.endDate) return false;
+            return new Date(t.startDate) <= now && now <= new Date(t.endDate);
+        });
+        
+        // Among date-matching terms, pick the one with the most courses
+        if (dateMatches.length > 0) {
+            const withCourses = dateMatches
+                .filter(t => termCourseCounts[t.id] > 0)
+                .sort((a, b) => (termCourseCounts[b.id] || 0) - (termCourseCounts[a.id] || 0));
+            if (withCourses.length > 0) return withCourses[0];
+        }
+        
+        // Strategy 2: Any term with the most courses (regardless of date)
+        const termsWithCourses = terms.filter(t => termCourseCounts[t.id] > 0);
+        if (termsWithCourses.length > 0) {
+            return termsWithCourses.sort((a, b) => 
+                (termCourseCounts[b.id] || 0) - (termCourseCounts[a.id] || 0)
+            )[0];
+        }
+        
+        // Strategy 3: Most recent term by start date (last resort)
+        const sorted = terms.filter(t => t.startDate).sort((a, b) => 
+            new Date(b.startDate) - new Date(a.startDate)
+        );
+        if (sorted.length > 0) return sorted[0];
+    }
+    
+    return null; // No filter — show all courses
+}
+
+// --- Recursive file collection ---
+
+async function collectFiles(courseId, contentId, parentPath, depth = 0) {
+    if (depth > 5) return []; // safety limit
+    const files = [];
+    const path = `/learn/api/v1/courses/${courseId}/contents/${contentId}/children?limit=500`;
+    const data = await fetchAPI(path);
+    if (!data?.results) return files;
+    
+    for (const item of data.results) {
+        const handler = item.contentHandler || '';
+        const title = item.title || 'Untitled';
+        const itemPath = parentPath ? `${parentPath} / ${title}` : title;
+        
+        if (handler === 'resource/x-bb-file') {
+            const fileInfo = item.contentDetail?.['resource/x-bb-file']?.file;
+            if (fileInfo) {
+                files.push({
+                    name: title,
+                    fileName: fileInfo.fileName,
+                    fileSize: fileInfo.fileSize,
+                    downloadUrl: fileInfo.permanentUrl,
+                    path: itemPath,
+                    depth: depth,
+                    type: 'file'
+                });
+            }
+        } else if (handler === 'resource/x-bb-folder' || handler === 'resource/x-bb-lesson') {
+            files.push({
+                name: title,
+                path: itemPath,
+                depth: depth,
+                type: handler.includes('folder') ? 'folder' : 'lesson',
+                children: await collectFiles(courseId, item.id, itemPath, depth + 1)
+            });
+        } else if (handler === 'resource/x-bb-asmt-test-link') {
+            // Assessments — grab embedded file attachments from instructions
+            const detail = item.contentDetail?.[handler] || {};
+            const instructions = detail.test?.assessment?.instructions?.displayText || '';
+            const fileMatches = [...instructions.matchAll(/data-bbfile="([^"]+)"/g)];
+            for (const m of fileMatches) {
+                try {
+                    const fd = JSON.parse(m[1].replace(/&quot;/g, '"'));
+                    files.push({
+                        name: fd.displayName || title,
+                        fileName: fd.fileName,
+                        path: itemPath,
+                        depth: depth + 1,
+                        type: 'file'
+                    });
+                } catch {}
+            }
+            // Store the assessment with its instructions text
+            const cleanInstructions = stripHtml(instructions).trim();
+            files.push({
+                name: title,
+                path: itemPath,
+                depth: depth,
+                type: 'assessment',
+                instructions: cleanInstructions.length > 20 ? cleanInstructions : null
+            });
+        } else if (handler === 'resource/x-bb-document') {
+            files.push({
+                name: title,
+                path: itemPath,
+                depth: depth,
+                type: 'document'
+            });
+        }
+    }
+    return files;
+}
+
+// --- Main extraction ---
+
+async function runExtraction() {
+    addLog('Starting extraction...');
+    apiBodies = {};
+    apiRequests = {};
+    
+    await startCapture();
+    
+    // Phase 1: Navigate to course list
+    addLog('Loading course list...');
+    await navigateAndWait('https://learn.bu.edu/ultra/course', 4000);
+    
+    // Discover courses
+    const memberUrl = Object.keys(apiBodies).find(u => u.includes('memberships'));
+    if (!memberUrl) {
+        addLog('ERROR: No memberships API captured. Try again.');
+        await stopCapture();
+        return;
+    }
+    
+    const memberData = apiBodies[memberUrl];
+    const alwaysSkip = ['orientation', 'integrity', 'module', 'immigration', 'global_ped'];
+    const courseList = [];
+    const seen = new Set();
+    
+    for (const r of (memberData?.results || [])) {
+        const course = r.course || {};
+        const cid = r.courseId;
+        if (r.role !== 'S' || !course.isAvailable || course.isClosed || seen.has(cid)) continue;
+        const display = course.displayId || cid;
+        const name = (course.name || '').toLowerCase();
+        const displayLower = display.toLowerCase();
+        if (alwaysSkip.some(kw => displayLower.includes(kw) || name.includes(kw))) continue;
+        // Also skip locked courses and non-credit modules
+        if (course.isLocked || course.isNonCredit) continue;
+        seen.add(cid);
+        courseList.push({ id: cid, displayId: display, termId: course.termId });
+    }
+    
+    // Debug: show what termIds we found
+    const debugTerms = {};
+    for (const c of courseList) {
+        debugTerms[c.termId || 'null'] = (debugTerms[c.termId || 'null'] || 0) + 1;
+    }
+    addLog(`Term IDs from memberships: ${JSON.stringify(debugTerms)}`);
+    
+    // Discover terms from CDP-captured responses
+    let terms = discoverTerms(apiBodies);
+    
+    // Fallback: if no terms captured, fetch them directly
+    if (!terms.length) {
+        addLog('Fetching terms API...');
+        const termsData = await fetchAPI('/learn/api/v1/terms?limit=100');
+        if (termsData?.results) {
+            terms = termsData.results.map(t => ({
+                id: t.id, name: t.name || '',
+                startDate: t.startDate, endDate: t.endDate, isAvailable: t.isAvailable
+            }));
+        }
+    }
+    addLog(`Found ${terms.length} terms`);
+    
+    // Find and apply current term filter
+    const currentTerm = findCurrentTerm(terms, courseList);
+    addLog(`Term filter: ${currentTerm ? (currentTerm.name || currentTerm.id) : 'none found'}`);
+    
+    if (currentTerm) {
+        const termCourses = courseList.filter(c => c.termId === currentTerm.id);
+        if (termCourses.length > 0) {
+            addLog(`Current term: ${currentTerm.name || currentTerm.id} (${termCourses.length} courses)`);
+            courseList.length = 0;
+            for (const c of termCourses) courseList.push(c);
+        } else {
+            // termId from count strategy didn't match any courses — try date-based
+            addLog(`Term ${currentTerm.name || currentTerm.id} has 0 matching courses — no filter applied`);
+        }
+    } else {
+        addLog('WARNING: Could not determine current term — processing all courses');
+    }
+    
+    addLog(`Processing ${courseList.length} courses`);
+    for (const c of courseList) addLog(`  ${c.displayId}`);
+    
+    if (!courseList.length) {
+        await stopCapture();
+        return;
+    }
+    
+    // Phase 2: Visit each course to capture content, then fetch grades/calendar directly
+    courses = {};
+    for (let i = 0; i < courseList.length; i++) {
+        const course = courseList[i];
+        addLog(`[${i+1}/${courseList.length}] Loading ${shortName(course)}...`);
+        
+        // Visit outline (triggers content tree + announcements capture via CDP)
+        await navigateAndWait(`https://learn.bu.edu/ultra/courses/${course.id}/outline`, 3000);
+        
+        // Fetch grades and calendar directly via API (no navigation needed)
+        addLog(`  Grades...`);
+        const gradesData = await fetchAPI(`/learn/api/v1/courses/${course.id}/gradebook/grades?limit=100`);
+        
+        addLog(`  Calendar...`);
+        const calendarData = await fetchAPI(`/learn/api/v1/courses/${course.id}/calendars/calendarItems?limit=100`);
+        
+        const data = { grades: [], deadlines: [], announcements: [], files: [] };
+        
+        // Process grades from direct fetch
+        if (gradesData?.results) {
+            for (const r of gradesData.results) {
+                const col = r.column || {};
+                const display = r.displayGrade || {};
+                if (!data.grades.find(g => g.columnId === r.columnId)) {
+                    data.grades.push({
+                        columnId: r.columnId,
+                        name: col.effectiveColumnName || 'Unknown',
+                        score: display.score,
+                        grade: display.grade,
+                        pointsPossible: r.pointsPossible,
+                        status: r.submissionStatus?.status,
+                        dueDate: col.dueDate
+                    });
+                    if (col.effectiveColumnName && col.dueDate) {
+                        data.deadlines.push({
+                            title: col.effectiveColumnName,
+                            dueDate: col.dueDate,
+                            source: 'gradebook',
+                            status: r.submissionStatus?.status,
+                            type: classifyDeadline(col.effectiveColumnName)
+                        });
+                    }
+                }
+            }
+        }
+        
+        // Process calendar from direct fetch
+        if (calendarData?.results) {
+            const existingTitles = new Set(data.deadlines.map(d => d.title));
+            const dayFrequency = [0, 0, 0, 0, 0, 0, 0];
+            
+            for (const item of calendarData.results) {
+                if (item.title && item.endDate && !existingTitles.has(item.title)) {
+                    data.deadlines.push({ title: item.title, dueDate: item.endDate, source: 'calendar', type: classifyDeadline(item.title) });
+                    existingTitles.add(item.title);
+                }
+                if (item.startDate) {
+                    const start = new Date(item.startDate);
+                    const end = item.endDate ? new Date(item.endDate) : null;
+                    const durationHours = end ? (end - start) / 3600000 : 0;
+                    if (durationHours > 0 && durationHours <= 4) {
+                        dayFrequency[start.getDay()]++;
+                    }
+                }
+            }
+            
+            const meetingDays = [];
+            const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+            for (let d = 0; d < 7; d++) {
+                if (dayFrequency[d] >= 2) meetingDays.push(d);
+            }
+            data.meetingDays = meetingDays;
+            data.meetingDaysNames = meetingDays.map(d => dayNames[d]);
+        }
+        
+        // Also grab any grades/calendar captured via CDP (may have more data)
+        for (const [url, body] of Object.entries(apiBodies)) {
+            if (!url.includes(course.id)) continue;
+            
+            // Announcements (only from CDP — not fetched directly)
+            if (url.includes('announcements?') && body?.results) {
+                for (const item of body.results) {
+                    const b = item.body || {};
+                    if (!data.announcements.find(a => a.id === item.id)) {
+                        data.announcements.push({
+                            id: item.id,
+                            title: item.title || '',
+                            body: b.displayText || b.rawText || '',
+                            postedDate: item.createdDate,
+                            isRead: item.readStatus?.isRead || false
+                        });
+                    }
+                }
+            }
+        }
+        
+        // Nested file traversal via direct API fetch
+        addLog(`  Scanning files...`);
+        data.files = await collectFiles(course.id, 'ROOT', '', 0);
+        const fileCount = countFiles(data.files);
+        addLog(`  Found ${fileCount} files in ${data.files.length} items`);
+        
+        data.deadlines.sort((a, b) => (a.dueDate || '9999').localeCompare(b.dueDate || '9999'));
+        courses[course.id] = { ...course, ...data };
+        addLog(`  ${data.grades.length} grades, ${data.deadlines.length} deadlines, ${data.announcements.length} announcements${data.meetingDaysNames?.length ? ', meets: ' + data.meetingDaysNames.join('/') : ''}`);
+    }
+    
+    // Match assessment instructions to deadlines
+    matchInstructionsToDeadlines();
+    
+    // Phase 3: Process activity stream from CDP-captured data
+    addLog('Processing activity stream...');
+    let activityStream = [];
+    const streamUrls = Object.keys(apiBodies).filter(u => u.includes('streams/ultra'));
+    
+    if (streamUrls.length > 0) {
+        const now = Date.now();
+        const seen = new Set();
+        
+        for (const url of streamUrls) {
+            const body = apiBodies[url];
+            if (!body?.results) continue;
+            
+            for (const entry of body.results) {
+                const provider = entry.providerId || '';
+                const specificData = entry.itemSpecificData || {};
+                const notification = specificData.notificationDetails || {};
+                const courseKey = notification.courseId || entry.courseId || '';
+                const timestamp = entry.timestamp || entry.createdDate || null;
+                
+                // Deduplicate by timestamp + provider
+                const key = `${timestamp}-${provider}-${courseKey}`;
+                if (seen.has(key)) continue;
+                seen.add(key);
+                
+                const item = {
+                    provider,
+                    courseId: courseKey,
+                    seen: notification.seen ?? true,
+                    sourceType: notification.sourceType || '',
+                    timestamp,
+                };
+                
+                if (provider === 'bb-nautilus' && notification.sourceType === 'CO') {
+                    item.type = 'content';
+                    item.title = notification.contentTitle || '';
+                    item.courseName = notification.courseName || '';
+                } else if (provider === 'bb-nautilus' && notification.sourceType === 'GB') {
+                    item.type = 'grade';
+                    item.title = notification.contentTitle || '';
+                } else if (provider === 'bb-announcement') {
+                    item.type = 'announcement';
+                    item.title = specificData.title || '';
+                } else if (provider === 'bb_calendar') {
+                    item.type = 'calendar';
+                    item.title = specificData.title || '';
+                } else if (provider === 'bb_mygrades') {
+                    item.type = 'grade';
+                } else if (provider === 'bb_disc') {
+                    item.type = 'discussion';
+                    item.title = specificData.title || '';
+                } else {
+                    item.type = provider;
+                }
+                
+                if (item.timestamp) {
+                    const daysAgo = (now - new Date(item.timestamp).getTime()) / 86400000;
+                    if (daysAgo <= 14) activityStream.push(item);
+                }
+            }
+        }
+        
+        addLog(`Activity stream: ${activityStream.length} recent items from ${streamUrls.length} captures`);
+        
+        // Use stream to detect class meeting days (fallback if calendar didn't have enough data)
+        for (const [id, c] of Object.entries(courses)) {
+            if (c.meetingDays?.length) continue;
+            
+            const courseItems = activityStream.filter(item => {
+                if (item.courseId === id) return true;
+                if (item.courseName && c.displayId && 
+                    item.courseName.includes(c.displayId)) return true;
+                return false;
+            });
+            
+            if (courseItems.length >= 3) {
+                const dayFrequency = [0, 0, 0, 0, 0, 0, 0];
+                for (const item of courseItems) {
+                    if (item.timestamp) {
+                        dayFrequency[new Date(item.timestamp).getDay()]++;
+                    }
+                }
+                const meetingDays = [];
+                const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+                for (let d = 0; d < 7; d++) {
+                    if (dayFrequency[d] >= 2) meetingDays.push(d);
+                }
+                if (meetingDays.length) {
+                    c.meetingDays = meetingDays;
+                    c.meetingDaysNames = meetingDays.map(d => dayNames[d]);
+                    addLog(`  ${shortName(c)}: stream-detected meets ${c.meetingDaysNames.join('/')}`);
+                }
+            }
+        }
+    } else {
+        addLog('Activity stream: no stream data captured');
+    }
+    
+    await stopCapture();
+    addLog('Extraction complete!');
+    
+    allResponses = {};
+    for (const [url, body] of Object.entries(apiBodies)) {
+        allResponses[url] = { data: body, timestamp: Date.now() };
+    }
+    
+    await chrome.storage.local.set({
+        scout_data: {
+            courses,
+            allResponses,
+            activityStream: activityStream || [],
+            ignoredDeadlines: [...ignoredDeadlines],
+            extractedAt: Date.now()
+        }
+    });
+    // Clear extraction-in-progress flag
+    chrome.storage.local.remove('scout_extracting');
+    addLog('Data saved locally');
+    
+    // Notify popup that extraction is done
+    chrome.runtime.sendMessage({ type: 'EXTRACTION_DONE' }).catch(() => {});
+}
+
+// --- Match assessment instructions to deadlines ---
+
+function findAssessmentsWithInstructions(items, results) {
+    if (!items) return results;
+    for (const item of items) {
+        if (item.type === 'assessment' && item.instructions) {
+            results.push({ name: item.name, instructions: item.instructions });
+        }
+        if (item.children) findAssessmentsWithInstructions(item.children, results);
+    }
+    return results;
+}
+
+function matchInstructionsToDeadlines() {
+    for (const [id, c] of Object.entries(courses)) {
+        const assessments = findAssessmentsWithInstructions(c.files || [], []);
+        if (!assessments.length) continue;
+        
+        for (const dl of (c.deadlines || [])) {
+            if (dl.instructions) continue; // already has instructions
+            const dlTitle = (dl.title || '').toLowerCase();
+            
+            for (const a of assessments) {
+                const aName = (a.name || '').toLowerCase();
+                // Exact or substring match
+                if (dlTitle === aName || dlTitle.includes(aName) || aName.includes(dlTitle)) {
+                    dl.instructions = a.instructions;
+                    break;
+                }
+                // Word overlap (at least 2 significant words in common)
+                const dlWords = dlTitle.split(/\s+/).filter(w => w.length > 3);
+                const aWords = aName.split(/\s+/).filter(w => w.length > 3);
+                const overlap = dlWords.filter(w => aWords.includes(w));
+                if (overlap.length >= 2) {
+                    dl.instructions = a.instructions;
+                    break;
+                }
+            }
+        }
+    }
+}
+
+function countFiles(items) {
+    let count = 0;
+    for (const item of items) {
+        if (item.type === 'file') count++;
+        if (item.children) count += countFiles(item.children);
+    }
+    return count;
+}
+
+
+// ====== MESSAGE HANDLING ======
+
+// Track extraction state
+let extracting = false;
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message.type === 'START_EXTRACTION') {
+        if (extracting) {
+            sendResponse({ status: 'already_running' });
+            return true;
+        }
+        extracting = true;
+        chrome.storage.local.set({ scout_extracting: true });
+        
+        runExtraction().then(() => {
+            extracting = false;
+            chrome.storage.local.remove('scout_extracting');
+            // Notify any open popups
+            chrome.runtime.sendMessage({ type: 'EXTRACTION_DONE' }).catch(() => {});
+        }).catch(e => {
+            extracting = false;
+            chrome.storage.local.remove('scout_extracting');
+            chrome.storage.local.set({ scout_error: e.message });
+            chrome.runtime.sendMessage({ type: 'EXTRACTION_ERROR', error: e.message }).catch(() => {});
+        });
+        
+        sendResponse({ status: 'started' });
+        return true;
+    }
+    
+    if (message.type === 'GET_STATUS') {
+        sendResponse({ extracting });
+        return true;
     }
 });
 
-// --- Badge on install ---
+// Badge
 chrome.runtime.onInstalled.addListener(() => {
-    console.log('[Scout] Extension installed/updated v2.0.0');
+    console.log('[Scout] Extension installed/updated v3.4.0');
 });

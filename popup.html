@@ -9,73 +9,45 @@
 <body>
     <div class="app">
         <header>
-            <div class="logo">
-                <span class="logo-icon">◉</span>
+            <div class="logo-row">
                 <span class="logo-text">Scout</span>
+                <div style="display:flex;align-items:center;gap:8px">
+                    <span class="header-meta" id="meta"></span>
+                    <button class="refresh-btn" id="refreshBtn" title="Refresh">&#8635;</button>
+                </div>
             </div>
-            <div class="header-right">
-                <span class="meta" id="meta"></span>
-                <button class="refresh-btn" id="refreshBtn" title="Refresh">↻</button>
-            </div>
+            <div class="greeting" id="greeting"></div>
         </header>
-        
+
         <!-- Start screen -->
-        <div id="startScreen" class="empty-state">
-            <div class="empty-icon">◉</div>
+        <div id="startScreen" class="empty-state hidden">
             <h2>Scout</h2>
-            <p>Click to extract your grades, deadlines, and announcements from Blackboard.</p>
-            <button class="btn" id="startBtn">Extract Data</button>
+            <p>Connect to Blackboard to see your deadlines, grades, and materials.</p>
+            <button class="btn-large" id="startBtn">Connect</button>
         </div>
-        
-        <!-- Log -->
-        <div id="logContainer" style="margin-top:8px">
-            <div id="log" style="background:#0d0d1a;border:1px solid #333;border-radius:6px;padding:6px;max-height:150px;overflow-y:auto;font:10px monospace;color:#aaa;white-space:pre-wrap;word-break:break-all"></div>
-        </div>
-        
-        <!-- Status bar -->
-        <div class="status-bar hidden" id="statusBar">
-            <span class="status-text" id="statusText"></span>
-        </div>
-        
-        <!-- Loading -->
+
+        <!-- Loading screen (replaces debug log) -->
         <div class="loading hidden" id="loadingState">
             <div class="spinner"></div>
-            <p>Extracting data...</p>
+            <div class="loading-text">Pulling your data from Blackboard...</div>
+            <div class="loading-sub" id="loadingSub">This usually takes about a minute</div>
         </div>
-        
+
         <!-- Dashboard -->
         <div class="dashboard hidden" id="dashboard">
             <div class="search-bar">
-                <input type="text" id="searchInput" placeholder="Search assignments, exams..." />
+                <input type="text" id="searchInput" placeholder="Search tasks..." />
             </div>
-            <section class="task-section">
-                <div class="section-header-row">
-                    <h3 class="section-title do-this">⚡ DO THIS</h3>
-                    <div class="mode-toggles" id="doThisModes">
-                        <button class="mode-btn" data-mode="nextclass">Next Class</button>
-                        <button class="mode-btn" data-mode="nextweek">Next Week</button>
-                        <button class="mode-btn active" data-mode="all">All</button>
-                    </div>
-                </div>
-                <div id="doThis"></div>
-            </section>
-            <section class="task-section">
-                <h3 class="section-title due-today">📌 DUE TODAY</h3>
-                <div id="dueToday"></div>
-            </section>
-            <section class="task-section">
-                <h3 class="section-title prep">📚 PREP FOR THIS</h3>
-                <div id="prepForThis"></div>
-            </section>
-            <section class="task-section">
-                <h3 class="section-title now">👁 NOW</h3>
-                <div id="nowSection"></div>
-            </section>
-            <section class="task-section">
-                <h3 class="section-title status">📋 STATUS</h3>
-                <div id="statusSection"></div>
-            </section>
-            <div id="debugInfo"></div>
+
+            <div class="tabs">
+                <button class="tab active" data-view="thisweek">this week</button>
+                <button class="tab" data-view="upcoming">upcoming</button>
+                <button class="tab" data-view="log">done</button>
+            </div>
+
+            <div class="views active" id="thisweek"></div>
+            <div class="views" id="upcoming"></div>
+            <div class="views" id="log"></div>
         </div>
     </div>
     <script src="popup.js"></script>
