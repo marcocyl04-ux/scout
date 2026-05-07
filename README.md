@@ -2,18 +2,17 @@
 
 A Chrome extension for BU students. Open it, see what's due, get it done.
 
-![Version](https://img.shields.io/badge/version-3.1.2-blue)
+![Version](https://img.shields.io/badge/version-3.4.1-blue)
 ![Chrome](https://img.shields.io/badge/Chrome-Manifest%20V3-green)
 
 ## What It Does
 
 Scout extracts your courses, deadlines, grades, files, and announcements from Blackboard Ultra and organizes them in one popup:
 
-- **Action Center** — deadlines sorted by urgency (overdue → today → next class → this week → next week → completed)
+- **Upcoming** — deadlines grouped by course, sorted by type (Exams → In-Class → Homework)
+- **Completed** — submitted/overdue items with grade status
 - **File Bundles** — relevant files attached to each deadline automatically
-- **Grades** — all your grades at a glance
-- **Announcements** — recent announcements from all courses
-- **New This Week** — activity stream showing what's new
+- **Ask AI** — generates a prompt with assignment context, copies to clipboard
 
 It only shows your **current semester** courses (auto-detected).
 
@@ -37,7 +36,7 @@ Unzip it anywhere (Desktop is fine).
 
 1. Log into [Blackboard](https://learn.bu.edu) in Chrome
 2. Click the **Scout** icon in your toolbar
-3. Click **Extract Data**
+3. Click **Connect to Blackboard**
 4. The first time, Chrome will show a bar asking permission for the debugger — **this is normal**. The page will refresh and extraction continues automatically.
 5. Done. Your dashboard appears.
 
@@ -51,11 +50,11 @@ Scout uses Chrome's built-in debugger (CDP) to read the Blackboard API responses
 
 ## Refreshing Data
 
-Your data stays cached for **1 hour**. To refresh:
+Your data stays cached for **2 hours**. To refresh:
 
 1. Open the Scout popup
 2. Click the **↻** button (top-right)
-3. Wait for extraction to complete (takes ~30 seconds for 5 courses)
+3. Wait for extraction to complete (~1 minute)
 
 ## Troubleshooting
 
@@ -68,8 +67,6 @@ Your data stays cached for **1 hour**. To refresh:
 | "Another debugger is already attached" | Close Chrome DevTools if open, then try again. |
 
 ## Permissions Explained
-
-The extension requests these permissions:
 
 | Permission | Why |
 |------------|-----|
@@ -84,7 +81,6 @@ The extension requests these permissions:
 - All data stays on your machine
 - No analytics, no tracking, no external servers
 - Data is cleared when you clear Chrome's extension storage
-- The optional `localhost:8080` sync is for development only and does nothing unless you're running the dev server
 
 ## For Developers
 
@@ -97,18 +93,19 @@ cd scout
 # chrome://extensions/ → Developer mode → Load unpacked → select this folder
 
 # Files
-popup.js     — Main logic (extraction, rendering, CDP)
-popup.html   — UI structure
-popup.css    — Styles
+background.js — Service worker (extraction engine)
+popup.js      — Rendering + message passing
+popup.html    — UI structure
+popup.css     — Styles
 manifest.json — Extension config
-background.js — Service worker
-interceptor.js — Legacy (unused, kept for reference)
 ```
 
 ## Version History
 
 | Version | Changes |
 |---------|---------|
+| 3.4.1 | Pruned dead code (content.js, interceptor.js). Fixed file bundling (path-based matching), overdue aging (14-day cutoff), stuck loading state (stale flag cleanup), dismissed deadline persistence, deterministic course colors. |
+| 3.4.0 | One-click connect, warm design, greeting, task grouping by type. |
 | 3.1.2 | Auto-retry after debugger permission prompt. Cache extended to 1 hour. |
 | 3.1.1 | Date-based term filter (primary). Count-based as fallback. |
 | 3.1.0 | Recursive nested file traversal. 4-page extraction per course. |

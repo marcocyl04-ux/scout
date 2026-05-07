@@ -66,6 +66,8 @@ header { margin-bottom: 16px; }
 .course-group { margin-bottom: 16px; }
 .course-group:last-child { margin-bottom: 0; }
 .course-name { font-size: 11px; font-weight: 600; letter-spacing: 0.02em; color: var(--text-dim); margin-bottom: 6px; padding-left: 2px; }
+.type-group { margin-left: 8px; margin-bottom: 4px; }
+.type-label { font-size: 9px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-dim); opacity: 0.6; margin-bottom: 4px; padding-left: 2px; }
 
 /* Task cards (upcoming view) */
 .task {

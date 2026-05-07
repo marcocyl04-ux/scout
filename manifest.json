@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Scout — Blackboard Command Center",
-  "version": "3.4.0",
+  "version": "3.4.1",
   "description": "Your Blackboard dashboard. See all your grades, deadlines, and announcements in one place.",
   "permissions": [
     "storage",

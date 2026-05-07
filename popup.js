@@ -1,21 +1,23 @@
-// Scout — Popup v3.4.0
+// Scout — Popup v3.4.1
 // Rendering + message passing. Extraction runs in background.js.
 
 const COLORS = ['#6c72ff', '#54a0ff', '#2ed573', '#ff9f43', '#ff5c5c', '#a55eea', '#ffc048'];
-const COLOR_MAP = {};
 
 let courses = {};
 let ignoredDeadlines = new Set();
 let searchQuery = '';
 
-// --- Helpers ---
+// --- Helpers (keep in sync with background.js) ---
+// Deterministic color from course ID — same ID always gets same color
 function courseColor(id) {
-    if (!COLOR_MAP[id]) COLOR_MAP[id] = COLORS[Object.keys(COLOR_MAP).length % COLORS.length];
-    return COLOR_MAP[id];
+    let hash = 0;
+    for (let i = 0; i < id.length; i++) hash = ((hash << 5) - hash) + id.charCodeAt(i);
+    return COLORS[Math.abs(hash) % COLORS.length];
 }
 function shortName(info) {
     if (!info?.displayId) return '?';
-    const m = info.displayId.match(/([a-z]{2,4})(\d{2,3})/i);
+    const stripped = info.displayId.replace(/^\d{2}[a-z]+(?:qst|cas|eng|met|smg|cgs|sar|sph|sha|gms|law|sed|wheel)/i, '');
+    const m = stripped.match(/(?:[a-z]{2})?([a-z]{2,4})(\d{2,3})/i);
     return m ? (m[1] + m[2]).toUpperCase() : info.displayId.slice(-12);
 }
 function daysUntil(s) {
@@ -25,7 +27,7 @@ function daysUntil(s) {
     return Math.ceil((d - now) / 86400000);
 }
 
-// --- File bundling ---
+// --- File bundling (path-based matching) ---
 function getTopFolder(path) {
     if (!path) return null;
     return path.split(' / ')[0]?.trim() || null;
@@ -49,13 +51,26 @@ function bundleFilesForDeadline(deadline, courseFiles) {
     const dlWords = dlTitle.split(/\s+/).filter(w => w.length > 3);
     const matched = [];
     const seen = new Set();
+
     for (const file of flat) {
+        if (seen.has(file.name)) continue;
         const fname = (file.name || '').toLowerCase();
+        const fpath = (file.path || '').toLowerCase();
+        const ffolder = (file.parentFolder || '').toLowerCase();
         let hit = false;
-        if (dlWords.length > 0) {
-            if (dlWords.filter(w => fname.includes(w)).length >= 1) hit = true;
+
+        // Strategy 1: Deadline title substring in file path (most reliable)
+        if (dlTitle.length > 3 && fpath.includes(dlTitle)) hit = true;
+        // Strategy 2: Deadline title substring in parent folder name
+        if (!hit && dlTitle.length > 3 && ffolder.includes(dlTitle)) hit = true;
+        // Strategy 3: Folder name matches significant deadline words (>=2 words)
+        if (!hit && dlWords.length >= 2) {
+            const folderWords = ffolder.split(/[\s\-_/]+/).filter(w => w.length > 2);
+            const overlap = dlWords.filter(w => folderWords.some(fw => fw.includes(w) || w.includes(fw)));
+            if (overlap.length >= 2) hit = true;
         }
-        if (hit && !seen.has(file.name)) {
+
+        if (hit) {
             seen.add(file.name);
             matched.push(file);
         }
@@ -87,65 +102,85 @@ function renderDashboard() {
     }
     document.getElementById('meta').textContent = `${courseCount} courses${freshness}`;
 
-    const assignments = [], exams = [];
+    const allItems = [];
+    const courseNames = {};
     for (const [id, c] of Object.entries(courses)) {
         const name = shortName(c), color = courseColor(id);
+        courseNames[id] = { name, color };
         for (const d of (c.deadlines || [])) {
             const days = daysUntil(d.dueDate);
+            // Skip deadlines older than 14 days (both upcoming and completed)
             if (days !== null && days < -14) continue;
             const dlKey = `${id}-${d.title}-${d.dueDate}`;
             if (ignoredDeadlines.has(dlKey)) continue;
-            const isDone = d.status === 'GRADED' || d.status === 'SUBMITTED';
+            const st = (d.status || '').toUpperCase();
+            const isDone = st === 'GRADED' || st === 'SUBMITTED';
             const entry = { ...d, shortName: name, color, courseId: id, isDone, dlKey };
             if (searchQuery) {
                 const q = searchQuery.toLowerCase();
                 if (!(d.title || '').toLowerCase().includes(q) && !name.toLowerCase().includes(q)) continue;
             }
-            if (d.type === 'exam') exams.push(entry);
-            else assignments.push(entry);
+            allItems.push(entry);
         }
     }
 
-    renderUpcoming(assignments, exams);
-    renderLog(assignments, exams);
+    renderUpcoming(allItems, courseNames);
+    renderLog(allItems);
     updateGreeting();
-
-    const searchInput = document.getElementById('searchInput');
-    if (searchInput && !searchInput._bound) {
-        searchInput._bound = true;
-        searchInput.addEventListener('input', (e) => {
-            searchQuery = e.target.value.trim();
-            renderDashboard();
-        });
-    }
 
     document.getElementById('loadingState').classList.add('hidden');
     document.getElementById('dashboard').classList.remove('hidden');
+    document.getElementById('startScreen').classList.add('hidden');
 }
 
 
-
 // --- Upcoming ---
-function renderUpcoming(assignments, exams) {
+const TYPE_ORDER = ['homework', 'exam', 'in-class'];
+const TYPE_LABELS = { homework: 'Homework', assignment: 'Homework', exam: 'Exams', 'in-class': 'In-Class' };
+
+function renderUpcoming(allItems, courseNames) {
     const el = document.getElementById('upcoming');
-    const all = [...assignments, ...exams].filter(d => {
+    // Bug #16 fix: filter out items with no dueDate (they have no place in "upcoming")
+    // and exclude overdue items (days < 0) so they only appear in the completed/overdue tab.
+    const upcoming = allItems.filter(d => {
         if (d.isDone) return false;
+        if (!d.dueDate) return false; // Bug #16: exclude null/undefined dueDate items
         const days = daysUntil(d.dueDate);
-        return days === null || days >= 0;
+        return days !== null && days >= 0; // only truly upcoming (not overdue) items
     });
-    if (!all.length) { el.innerHTML = '<p class="empty-msg">Nothing upcoming</p>'; return; }
+
+    // Group upcoming items by course, then by type
     const grouped = {};
-    for (const d of all) {
-        const key = d.shortName;
-        if (!grouped[key]) grouped[key] = { color: d.color, items: [] };
-        grouped[key].items.push(d);
+    for (const d of upcoming) {
+        const key = d.courseId;
+        if (!grouped[key]) grouped[key] = {};
+        const tp = (d.type === 'assignment') ? 'homework' : (d.type || 'homework');
+        if (!grouped[key][tp]) grouped[key][tp] = [];
+        grouped[key][tp].push(d);
     }
-    const sorted = Object.entries(grouped).sort((a, b) =>
-        (a[1].items[0]?.dueDate || '9999').localeCompare(b[1].items[0]?.dueDate || '9999'));
+
+    // Render all courses (even those with nothing due)
+    const courseIds = Object.keys(courseNames);
     let html = '';
-    for (const [name, group] of sorted) {
-        html += `<div class="course-group"><div class="course-name" style="color:${group.color}">${name}</div>`;
-        for (const d of group.items) html += renderUpcomingCard(d);
+    for (const id of courseIds) {
+        const info = courseNames[id];
+        const types = grouped[id] || {};
+        const hasItems = Object.values(types).some(arr => arr.length > 0);
+
+        html += `<div class="course-group"><div class="course-name" style="color:${info.color}">${info.name}</div>`;
+
+        if (!hasItems) {
+            html += `<p class="empty-msg">nothing due</p>`;
+        } else {
+            for (const tp of TYPE_ORDER) {
+                const items = types[tp];
+                if (!items?.length) continue;
+                items.sort((a, b) => (a.dueDate || '9999').localeCompare(b.dueDate || '9999'));
+                html += `<div class="type-group"><div class="type-label">${TYPE_LABELS[tp] || tp}</div>`;
+                for (const d of items) html += renderUpcomingCard(d);
+                html += `</div>`;
+            }
+        }
         html += `</div>`;
     }
     el.innerHTML = html;
@@ -162,7 +197,7 @@ function renderUpcomingCard(entry) {
     let html = `<div class="task${isOverdue ? ' overdue' : ''}">`;
     html += `<div class="task-title">${entry.title}</div>`;
     html += `<div class="task-meta"><span class="task-due${isUrgent ? ' urgent' : ''}">${dayText}</span>`;
-    html += `<span class="task-type">${entry.type === 'exam' ? 'Exam' : 'Assignment'}</span></div>`;
+    html += `<span class="task-type">${TYPE_LABELS[entry.type] || 'Task'}</span></div>`;
     html += `<div class="task-expand"><div class="task-expand-inner">`;
     html += renderExpandContent(entry, bundled);
     html += `</div></div></div>`;
@@ -192,17 +227,16 @@ function renderExpandContent(entry, bundled) {
 }
 
 // --- Log ---
-function renderLog(assignments, exams) {
+function renderLog(allItems) {
     const el = document.getElementById('log');
-    const all = [...assignments, ...exams];
-    const done = all.filter(d => d.isDone).slice(0, 10);
-    const overdue = all.filter(d => !d.isDone && daysUntil(d.dueDate) !== null && daysUntil(d.dueDate) < 0);
+    const done = allItems.filter(d => d.isDone).slice(0, 10);
+    const overdue = allItems.filter(d => !d.isDone && daysUntil(d.dueDate) !== null && daysUntil(d.dueDate) < 0);
     if (!done.length && !overdue.length) { el.innerHTML = '<p class="empty-msg">Nothing to report</p>'; return; }
     let html = '';
     if (done.length) {
         html += '<div class="section-label">submitted</div>';
         for (const d of done) {
-            const gradeText = d.status === 'GRADED'
+            const gradeText = (d.status || '').toUpperCase() === 'GRADED'
                 ? `graded \u00b7 ${d.score != null ? (d.pointsPossible ? Math.round(d.score / d.pointsPossible * 100) : d.score) : ''}`
                 : 'submitted';
             html += `<div class="log-row"><span class="log-title">${d.title}</span><span class="log-course" style="color:${d.color}">${d.shortName}</span><span class="log-badge">${gradeText}</span></div>`;
@@ -262,11 +296,7 @@ function attachExpandListeners(el) {
         btn.addEventListener('click', (e) => {
             e.stopPropagation();
             ignoredDeadlines.add(btn.dataset.key);
-            chrome.storage.local.get('scout_data', (stored) => {
-                const data = stored?.scout_data || {};
-                data.ignoredDeadlines = [...ignoredDeadlines];
-                chrome.storage.local.set({ scout_data: data });
-            });
+            chrome.storage.local.set({ scout_ignored: [...ignoredDeadlines] });
             renderDashboard();
         });
     });
@@ -286,7 +316,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const dashboard = document.getElementById('dashboard');
     const loading = document.getElementById('loadingState');
 
-    // Tab switching
+    // Tab switching (bind once)
     document.querySelectorAll('.tab').forEach(tab => {
         tab.addEventListener('click', () => {
             document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -296,8 +326,14 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
     });
 
-    // Refresh button
+    // Refresh button (bind once)
     document.getElementById('refreshBtn').addEventListener('click', () => startExtraction());
+
+    // Search input (bind once)
+    document.getElementById('searchInput').addEventListener('input', (e) => {
+        searchQuery = e.target.value.trim();
+        renderDashboard();
+    });
 
     // Listen for background messages
     chrome.runtime.onMessage.addListener((msg) => {
@@ -314,50 +350,63 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     });
 
-    // Check stored data
-    const stored = await chrome.storage.local.get(['scout_data', 'scout_extracting']);
+    // 1. Check cached data first
+    const stored = await chrome.storage.local.get(['scout_data', 'scout_extracting', 'scout_ignored']);
     const data = stored?.scout_data;
     const wasExtracting = stored?.scout_extracting;
-
-    // Check if background is currently extracting
-    let bgExtracting = false;
-    try {
-        const status = await chrome.runtime.sendMessage({ type: 'GET_STATUS' });
-        bgExtracting = status?.extracting;
-    } catch(e) {}
-
-    if (bgExtracting || wasExtracting) {
-        // Background is running extraction — show loading
-        loading.classList.remove('hidden');
-        startScreen.classList.add('hidden');
-        return;
-    }
 
     if (data?.courses && data?.extractedAt) {
         const ageMin = (Date.now() - data.extractedAt) / 60000;
         if (ageMin < 120) {
             courses = data.courses;
-            ignoredDeadlines = new Set(data.ignoredDeadlines || []);
+            ignoredDeadlines = new Set(stored?.scout_ignored || []);
             const metaEl = document.getElementById('meta');
             if (metaEl) metaEl.dataset.extractedAt = data.extractedAt;
             startScreen.classList.add('hidden');
             renderDashboard();
+            // Still check if extraction is running
+            try {
+                const status = await chrome.runtime.sendMessage({ type: 'GET_STATUS' });
+                if (status?.extracting) {
+                    loading.classList.remove('hidden');
+                }
+            } catch(e) {}
             return;
         }
     }
 
-    // No data — show start screen
+    // 2. Check if background is extracting
+    let bgExtracting = false;
+    try {
+        const status = await chrome.runtime.sendMessage({ type: 'GET_STATUS' });
+        bgExtracting = status?.extracting;
+    } catch(e) { /* service worker may be idle */ }
+
+    // 3. Stale extraction flag cleanup:
+    // If storage says extracting but background says no — the service worker restarted.
+    // Clear the stale flag so we don't show a stuck spinner.
+    if (wasExtracting && !bgExtracting) {
+        chrome.storage.local.remove('scout_extracting');
+    }
+
+    if (bgExtracting) {
+        loading.classList.remove('hidden');
+        startScreen.classList.add('hidden');
+        return;
+    }
+
+    // 4. No data, not extracting — show onboarding
     startScreen.classList.remove('hidden');
     document.getElementById('startBtn').addEventListener('click', () => startExtraction());
 });
 
 // --- Load data from storage and render ---
 async function loadAndRender() {
-    const stored = await chrome.storage.local.get('scout_data');
+    const stored = await chrome.storage.local.get(['scout_data', 'scout_ignored']);
     const data = stored?.scout_data;
     if (data?.courses) {
         courses = data.courses;
-        ignoredDeadlines = new Set(data.ignoredDeadlines || []);
+        ignoredDeadlines = new Set(stored?.scout_ignored || []);
         const metaEl = document.getElementById('meta');
         if (metaEl) metaEl.dataset.extractedAt = data.extractedAt;
         renderDashboard();
